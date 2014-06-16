@@ -87,6 +87,7 @@ void bthost_add_l2cap_server(struct bthost *bthost, uint16_t psm,
 void bthost_set_pin_code(struct bthost *bthost, const uint8_t *pin,
 							uint8_t pin_len);
 void bthost_set_io_capability(struct bthost *bthost, uint8_t io_capability);
+void bthost_set_auth_req(struct bthost *bthost, uint8_t auth_req);
 void bthost_set_reject_user_confirm(struct bthost *bthost, bool reject);
 
 typedef void (*bthost_rfcomm_connect_cb) (uint16_t handle, uint16_t cid,
@@ -99,6 +100,18 @@ bool bthost_connect_rfcomm(struct bthost *bthost, uint16_t handle,
 				uint8_t channel, bthost_rfcomm_connect_cb func,
 				void *user_data);
 
+typedef void (*bthost_rfcomm_chan_hook_func_t) (const void *data, uint16_t len,
+							void *user_data);
+
+void bthost_add_rfcomm_chan_hook(struct bthost *bthost, uint16_t handle,
+					uint8_t channel,
+					bthost_rfcomm_chan_hook_func_t func,
+					void *user_data);
+
+void bthost_send_rfcomm_data(struct bthost *bthost, uint16_t handle,
+					uint8_t channel, const void *data,
+					uint16_t len);
+
 void bthost_start(struct bthost *bthost);
 void bthost_stop(struct bthost *bthost);
 
@@ -110,6 +123,5 @@ void *smp_conn_add(void *smp_data, uint16_t handle, const uint8_t *ia,
 					const uint8_t *ra, bool conn_init);
 void smp_conn_del(void *conn_data);
 void smp_data(void *conn_data, const void *data, uint16_t len);
-int smp_get_ltk(void *smp_data, const uint8_t *rand, uint16_t div,
-								uint8_t *ltk);
+int smp_get_ltk(void *smp_data, uint64_t rand, uint16_t ediv, uint8_t *ltk);
 void smp_pair(void *conn_data);

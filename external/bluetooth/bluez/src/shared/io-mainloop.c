@@ -2,7 +2,7 @@
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
- *  Copyright (C) 2012  Intel Corporation. All rights reserved.
+ *  Copyright (C) 2012-2014  Intel Corporation. All rights reserved.
  *
  *
  *  This library is free software; you can redistribute it and/or
@@ -26,6 +26,7 @@
 #endif
 
 #include <unistd.h>
+#include <sys/socket.h>
 
 #include "monitor/mainloop.h"
 #include "src/shared/util.h"
@@ -42,6 +43,9 @@ struct io {
 	io_callback_func_t write_callback;
 	io_destroy_func_t write_destroy;
 	void *write_data;
+	io_callback_func_t disconnect_callback;
+	io_destroy_func_t disconnect_destroy;
+	void *disconnect_data;
 };
 
 static struct io *io_ref(struct io *io)
@@ -75,6 +79,9 @@ static void io_cleanup(void *user_data)
 	if (io->read_destroy)
 		io->read_destroy(io->read_data);
 
+	if (io->disconnect_destroy)
+		io->disconnect_destroy(io->disconnect_data);
+
 	if (io->close_on_destroy)
 		close(io->fd);
 
@@ -85,12 +92,27 @@ static void io_callback(int fd, uint32_t events, void *user_data)
 {
 	struct io *io = user_data;
 
-	if (events & (EPOLLERR | EPOLLHUP)) {
+	if ((events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))) {
 		io->read_callback = NULL;
 		io->write_callback = NULL;
 
-		mainloop_remove_fd(io->fd);
-		return;
+		if (!io->disconnect_callback) {
+			mainloop_remove_fd(io->fd);
+			return;
+		}
+
+		if (!io->disconnect_callback(io, io->disconnect_data)) {
+			if (io->disconnect_destroy)
+				io->disconnect_destroy(io->disconnect_data);
+
+			io->disconnect_callback = NULL;
+			io->disconnect_destroy = NULL;
+			io->disconnect_data = NULL;
+
+			io->events &= ~EPOLLRDHUP;
+
+			mainloop_modify_fd(io->fd, io->events);
+		}
 	}
 
 	if ((events & EPOLLIN) && io->read_callback) {
@@ -153,10 +175,9 @@ void io_destroy(struct io *io)
 	if (!io)
 		return;
 
-	mainloop_remove_fd(io->fd);
-
 	io->read_callback = NULL;
 	io->write_callback = NULL;
+	io->disconnect_callback = NULL;
 
 	mainloop_remove_fd(io->fd);
 
@@ -246,5 +267,38 @@ bool io_set_write_handler(struct io *io, io_callback_func_t callback,
 bool io_set_disconnect_handler(struct io *io, io_callback_func_t callback,
 				void *user_data, io_destroy_func_t destroy)
 {
-	return false;
+	uint32_t events;
+
+	if (!io || io->fd < 0)
+		return false;
+
+	if (io->disconnect_destroy)
+		io->disconnect_destroy(io->disconnect_data);
+
+	if (callback)
+		events = io->events | EPOLLRDHUP;
+	else
+		events = io->events & ~EPOLLRDHUP;
+
+	io->disconnect_callback = callback;
+	io->disconnect_destroy = destroy;
+	io->disconnect_data = user_data;
+
+	if (events == io->events)
+		return true;
+
+	if (mainloop_modify_fd(io->fd, events) < 0)
+		return false;
+
+	io->events = events;
+
+	return true;
+}
+
+bool io_shutdown(struct io *io)
+{
+	if (!io || io->fd < 0)
+		return false;
+
+	return shutdown(io->fd, SHUT_RDWR) == 0;
 }

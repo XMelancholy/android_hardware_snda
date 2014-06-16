@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-MULTIMEDIA_PATH := $(LOCAL_PATH)/../../multimedia
+MULTIMEDIA_PATH := hardware/snda/include
 
 LOCAL_PATH := $(call my-dir)
 

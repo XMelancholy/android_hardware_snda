@@ -28,7 +28,7 @@ LOCAL_SHARED_LIBRARIES:= \
 	libdl \
 	liblog \
 	libstelpcutils
-MULTIMEDIA_PATH := $(LOCAL_PATH)/../../multimedia
+MULTIMEDIA_PATH := hardware/snda/include
 
 LOCAL_C_INCLUDES += \
 	$(TOP)/frameworks/native/include/media/hardware \

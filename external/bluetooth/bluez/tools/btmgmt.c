@@ -30,6 +30,8 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <getopt.h>
 #include <stdbool.h>
@@ -40,14 +42,12 @@
 #include <bluetooth/sdp.h>
 #include <bluetooth/sdp_lib.h>
 
-#include <glib.h>
-#include "glib-helper.h"
+#include "src/uuid-helper.h"
+#include "lib/mgmt.h"
 
 #include "monitor/mainloop.h"
 #include "src/shared/util.h"
 #include "src/shared/mgmt.h"
-#include "lib/mgmt.h"
-#include "eir.h"
 
 static bool monitor = false;
 static bool discovery = false;
@@ -97,6 +97,8 @@ static const char *settings_str[] = {
 				"le",
 				"advertising",
 				"secure-conn",
+				"debug-keys",
+				"privacy",
 };
 
 static void print_settings(uint32_t settings)
@@ -121,7 +123,7 @@ static void new_settings(uint16_t index, uint16_t len,
 
 	if (monitor) {
 		printf("hci%u new_settings: ", index);
-		print_settings(bt_get_le32(ev));
+		print_settings(get_le32(ev));
 		printf("\n");
 	}
 }
@@ -189,7 +191,7 @@ static void connected(uint16_t index, uint16_t len, const void *param,
 		return;
 	}
 
-	eir_len = bt_get_le16(&ev->eir_len);
+	eir_len = get_le16(&ev->eir_len);
 	if (len != sizeof(*ev) + eir_len) {
 		fprintf(stderr, "Invalid connected event length "
 			"(%u bytes, eir_len %u bytes)\n", len, eir_len);
@@ -312,14 +314,69 @@ static void confirm_name_rsp(uint8_t status, uint16_t len,
 		printf("confirm_name succeeded for %s\n", addr);
 }
 
+static char *eir_get_name(const uint8_t *eir, uint16_t eir_len)
+{
+	uint8_t parsed = 0;
+
+	if (eir_len < 2)
+		return NULL;
+
+	while (parsed < eir_len - 1) {
+		uint8_t field_len = eir[0];
+
+		if (field_len == 0)
+			break;
+
+		parsed += field_len + 1;
+
+		if (parsed > eir_len)
+			break;
+
+		/* Check for short of complete name */
+		if (eir[1] == 0x09 || eir[1] == 0x08)
+			return strndup((char *) &eir[2], field_len - 1);
+
+		eir += field_len + 1;
+	}
+
+	return NULL;
+}
+
+static unsigned int eir_get_flags(const uint8_t *eir, uint16_t eir_len)
+{
+	uint8_t parsed = 0;
+
+	if (eir_len < 2)
+		return 0;
+
+	while (parsed < eir_len - 1) {
+		uint8_t field_len = eir[0];
+
+		if (field_len == 0)
+			break;
+
+		parsed += field_len + 1;
+
+		if (parsed > eir_len)
+			break;
+
+		/* Check for flags */
+		if (eir[1] == 0x01)
+			return eir[2];
+
+		eir += field_len + 1;
+	}
+
+	return 0;
+}
+
 static void device_found(uint16_t index, uint16_t len, const void *param,
 							void *user_data)
 {
 	const struct mgmt_ev_device_found *ev = param;
 	struct mgmt *mgmt = user_data;
-	uint32_t flags;
 	uint16_t eir_len;
-	struct eir_data eir;
+	uint32_t flags;
 
 	if (len < sizeof(*ev)) {
 		fprintf(stderr,
@@ -329,30 +386,33 @@ static void device_found(uint16_t index, uint16_t len, const void *param,
 
 	flags = btohl(ev->flags);
 
-	eir_len = bt_get_le16(&ev->eir_len);
+	eir_len = get_le16(&ev->eir_len);
 	if (len != sizeof(*ev) + eir_len) {
 		fprintf(stderr, "dev_found: expected %zu bytes, got %u bytes\n",
 						sizeof(*ev) + eir_len, len);
 		return;
 	}
 
-	memset(&eir, 0, sizeof(eir));
-	eir_parse(&eir, ev->eir, eir_len);
-
 	if (monitor || discovery) {
-		char addr[18];
+		char addr[18], *name;
+
 		ba2str(&ev->addr.bdaddr, addr);
 		printf("hci%u dev_found: %s type %s rssi %d "
 			"flags 0x%04x ", index, addr,
 			typestr(ev->addr.type), ev->rssi, flags);
 
-		if (eir.name)
-			printf("name %s\n", eir.name);
+		if (ev->addr.type != BDADDR_BREDR)
+			printf("AD flags 0x%02x ",
+					eir_get_flags(ev->eir, eir_len));
+
+		name = eir_get_name(ev->eir, eir_len);
+		if (name)
+			printf("name %s\n", name);
 		else
 			printf("eir_len %u\n", eir_len);
-	}
 
-	eir_data_free(&eir);
+		free(name);
+	}
 
 	if (discovery && (flags & MGMT_DEV_FOUND_CONFIRM_NAME)) {
 		struct mgmt_cp_confirm_name cp;
@@ -533,7 +593,7 @@ static void user_confirm(uint16_t index, uint16_t len, const void *param,
 	}
 
 	ba2str(&ev->addr.bdaddr, addr);
-	val = bt_get_le32(&ev->value);
+	val = get_le32(&ev->value);
 
 	if (monitor)
 		printf("hci%u %s User Confirm %06u hint %u\n", index, addr,
@@ -587,7 +647,7 @@ static void version_rsp(uint8_t status, uint16_t len, const void *param,
 	}
 
 	printf("MGMT Version %u, revision %u\n", rp->version,
-						bt_get_le16(&rp->revision));
+						get_le16(&rp->revision));
 
 done:
 	mainloop_quit();
@@ -623,8 +683,8 @@ static void commands_rsp(uint8_t status, uint16_t len, const void *param,
 		goto done;
 	}
 
-	num_commands = bt_get_le16(&rp->num_commands);
-	num_events = bt_get_le16(&rp->num_events);
+	num_commands = get_le16(&rp->num_commands);
+	num_events = get_le16(&rp->num_events);
 
 	expected_len = sizeof(*rp) + num_commands * sizeof(uint16_t) +
 						num_events * sizeof(uint16_t);
@@ -639,13 +699,13 @@ static void commands_rsp(uint8_t status, uint16_t len, const void *param,
 
 	printf("%u commands:\n", num_commands);
 	for (i = 0; i < num_commands; i++) {
-		uint16_t op = bt_get_le16(opcode++);
+		uint16_t op = get_le16(opcode++);
 		printf("\t%s (0x%04x)\n", mgmt_opstr(op), op);
 	}
 
 	printf("%u events:\n", num_events);
 	for (i = 0; i < num_events; i++) {
-		uint16_t ev = bt_get_le16(opcode++);
+		uint16_t ev = get_le16(opcode++);
 		printf("\t%s (0x%04x)\n", mgmt_evstr(ev), ev);
 	}
 
@@ -687,14 +747,14 @@ static void info_rsp(uint8_t status, uint16_t len, const void *param,
 	ba2str(&rp->bdaddr, addr);
 	printf("hci%u:\taddr %s version %u manufacturer %u"
 			" class 0x%02x%02x%02x\n", index,
-			addr, rp->version, bt_get_le16(&rp->manufacturer),
+			addr, rp->version, get_le16(&rp->manufacturer),
 			rp->dev_class[2], rp->dev_class[1], rp->dev_class[0]);
 
 	printf("\tsupported settings: ");
-	print_settings(bt_get_le32(&rp->supported_settings));
+	print_settings(get_le32(&rp->supported_settings));
 
 	printf("\n\tcurrent settings: ");
-	print_settings(bt_get_le32(&rp->current_settings));
+	print_settings(get_le32(&rp->current_settings));
 
 	printf("\n\tname %s\n", rp->name);
 	printf("\tshort name %s\n", rp->short_name);
@@ -727,7 +787,7 @@ static void index_rsp(uint8_t status, uint16_t len, const void *param,
 		goto done;
 	}
 
-	count = bt_get_le16(&rp->num_controllers);
+	count = get_le16(&rp->num_controllers);
 
 	if (len < sizeof(*rp) + count * sizeof(uint16_t)) {
 		fprintf(stderr,
@@ -750,7 +810,7 @@ static void index_rsp(uint8_t status, uint16_t len, const void *param,
 		uint16_t index;
 		void *data;
 
-		index = bt_get_le16(&rp->index[i]);
+		index = get_le16(&rp->index[i]);
 
 		if (monitor)
 			printf("hci%u ", index);
@@ -858,7 +918,7 @@ static void setting_rsp(uint16_t op, uint16_t id, uint8_t status, uint16_t len,
 	}
 
 	printf("hci%u %s complete, settings: ", id, mgmt_opstr(op));
-	print_settings(bt_get_le32(rp));
+	print_settings(get_le32(rp));
 	printf("\n");
 
 done:
@@ -1008,6 +1068,48 @@ static void cmd_bredr(struct mgmt *mgmt, uint16_t index, int argc, char **argv)
 	cmd_setting(mgmt, index, MGMT_OP_SET_BREDR, argc, argv);
 }
 
+static void cmd_privacy(struct mgmt *mgmt, uint16_t index, int argc,
+								char **argv)
+{
+	struct mgmt_cp_set_privacy cp;
+	int fd;
+
+	if (argc < 2) {
+		printf("Specify \"on\" or \"off\"\n");
+		exit(EXIT_FAILURE);
+	}
+
+	if (strcasecmp(argv[1], "on") == 0 || strcasecmp(argv[1], "yes") == 0)
+		cp.privacy = 0x01;
+	else if (strcasecmp(argv[1], "off") == 0)
+		cp.privacy = 0x00;
+	else
+		cp.privacy = atoi(argv[1]);
+
+	if (index == MGMT_INDEX_NONE)
+		index = 0;
+
+	fd = open("/dev/urandom", O_RDONLY);
+	if (fd < 0) {
+		fprintf(stderr, "open(/dev/urandom): %s\n", strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+
+	if (read(fd, cp.irk, sizeof(cp.irk)) != sizeof(cp.irk)) {
+		fprintf(stderr, "Reading from urandom failed\n");
+		close(fd);
+		exit(EXIT_FAILURE);
+	}
+
+	close(fd);
+
+	if (send_cmd(mgmt, MGMT_OP_SET_PRIVACY, index, sizeof(cp), &cp,
+							setting_rsp) == 0) {
+		fprintf(stderr, "Unable to send Set Privacy command\n");
+		exit(EXIT_FAILURE);
+	}
+}
+
 static void class_rsp(uint16_t op, uint16_t id, uint8_t status, uint16_t len,
 							const void *param)
 {
@@ -1084,20 +1186,52 @@ done:
 	mainloop_quit();
 }
 
+static void disconnect_usage(void)
+{
+	printf("Usage: btmgmt disconnect [-t type] <remote address>\n");
+}
+
+static struct option disconnect_options[] = {
+	{ "help",	0, 0, 'h' },
+	{ "type",	1, 0, 't' },
+	{ 0, 0, 0, 0 }
+};
+
 static void cmd_disconnect(struct mgmt *mgmt, uint16_t index, int argc,
 								char **argv)
 {
 	struct mgmt_cp_disconnect cp;
+	uint8_t type = BDADDR_BREDR;
+	int opt;
 
-	if (argc < 2) {
-		printf("Usage: btmgmt %s <address>\n", argv[0]);
+	while ((opt = getopt_long(argc, argv, "+t:h", disconnect_options,
+								NULL)) != -1) {
+		switch (opt) {
+		case 't':
+			type = strtol(optarg, NULL, 0);
+			break;
+		case 'h':
+		default:
+			disconnect_usage();
+			exit(EXIT_SUCCESS);
+		}
+	}
+
+	argc -= optind;
+	argv += optind;
+	optind = 0;
+
+	if (argc < 1) {
+		disconnect_usage();
 		exit(EXIT_FAILURE);
 	}
 
-	str2ba(argv[1], &cp.addr.bdaddr);
-
 	if (index == MGMT_INDEX_NONE)
 		index = 0;
+
+	memset(&cp, 0, sizeof(cp));
+	str2ba(argv[0], &cp.addr.bdaddr);
+	cp.addr.type = type;
 
 	if (mgmt_send(mgmt, MGMT_OP_DISCONNECT, index, sizeof(cp), &cp,
 					disconnect_rsp, NULL, NULL) == 0) {
@@ -1118,7 +1252,7 @@ static void con_rsp(uint8_t status, uint16_t len, const void *param,
 		goto done;
 	}
 
-	count = bt_get_le16(&rp->conn_count);
+	count = get_le16(&rp->conn_count);
 	if (len != sizeof(*rp) + count * sizeof(struct mgmt_addr_info)) {
 		fprintf(stderr, "Invalid get_connections length "
 					" (count=%u, len=%u)\n", count, len);
@@ -1287,7 +1421,7 @@ static void pair_rsp(uint8_t status, uint16_t len, const void *param,
 		goto done;
 	}
 
-	printf("Paired with %s\n", addr);
+	printf("Paired with %s (%s)\n", addr, typestr(rp->addr.type));
 
 done:
 	mainloop_quit();
@@ -1310,6 +1444,7 @@ static void cmd_pair(struct mgmt *mgmt, uint16_t index, int argc, char **argv)
 	struct mgmt_cp_pair_device cp;
 	uint8_t cap = 0x01;
 	uint8_t type = BDADDR_BREDR;
+	char addr[18];
 	int opt;
 
 	while ((opt = getopt_long(argc, argv, "+c:t:h", pair_options,
@@ -1344,6 +1479,9 @@ static void cmd_pair(struct mgmt *mgmt, uint16_t index, int argc, char **argv)
 	str2ba(argv[0], &cp.addr.bdaddr);
 	cp.addr.type = type;
 	cp.io_cap = cap;
+
+	ba2str(&cp.addr.bdaddr, addr);
+	printf("Pairing with %s (%s)\n", addr, typestr(cp.addr.type));
 
 	if (mgmt_send(mgmt, MGMT_OP_PAIR_DEVICE, index, sizeof(cp), &cp,
 						pair_rsp, NULL, NULL) == 0) {
@@ -1471,13 +1609,43 @@ done:
 	mainloop_quit();
 }
 
+static void unpair_usage(void)
+{
+	printf("Usage: btmgmt unpair [-t type] <remote address>\n");
+}
+
+static struct option unpair_options[] = {
+	{ "help",	0, 0, 'h' },
+	{ "type",	1, 0, 't' },
+	{ 0, 0, 0, 0 }
+};
+
 static void cmd_unpair(struct mgmt *mgmt, uint16_t index, int argc,
 								char **argv)
 {
 	struct mgmt_cp_unpair_device cp;
+	uint8_t type = BDADDR_BREDR;
+	int opt;
 
-	if (argc < 2) {
-		printf("Usage: btmgmt %s <remote address>\n", argv[0]);
+	while ((opt = getopt_long(argc, argv, "+t:h", unpair_options,
+								NULL)) != -1) {
+		switch (opt) {
+		case 't':
+			type = strtol(optarg, NULL, 0);
+			break;
+		case 'h':
+		default:
+			unpair_usage();
+			exit(EXIT_SUCCESS);
+		}
+	}
+
+	argc -= optind;
+	argv += optind;
+	optind = 0;
+
+	if (argc < 1) {
+		unpair_usage();
 		exit(EXIT_FAILURE);
 	}
 
@@ -1485,7 +1653,8 @@ static void cmd_unpair(struct mgmt *mgmt, uint16_t index, int argc,
 		index = 0;
 
 	memset(&cp, 0, sizeof(cp));
-	str2ba(argv[1], &cp.addr.bdaddr);
+	str2ba(argv[0], &cp.addr.bdaddr);
+	cp.addr.type = type;
 	cp.disconnect = 1;
 
 	if (mgmt_send(mgmt, MGMT_OP_UNPAIR_DEVICE, index, sizeof(cp), &cp,
@@ -1519,6 +1688,62 @@ static void cmd_keys(struct mgmt *mgmt, uint16_t index, int argc, char **argv)
 	if (mgmt_send(mgmt, MGMT_OP_LOAD_LINK_KEYS, index, sizeof(cp), &cp,
 						keys_rsp, NULL, NULL) == 0) {
 		fprintf(stderr, "Unable to send load_keys cmd\n");
+		exit(EXIT_FAILURE);
+	}
+}
+
+static void ltks_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	if (status != 0)
+		fprintf(stderr, "Load keys failed with status 0x%02x (%s)\n",
+						status, mgmt_errstr(status));
+	else
+		printf("Long term keys successfully loaded\n");
+
+	mainloop_quit();
+}
+
+static void cmd_ltks(struct mgmt *mgmt, uint16_t index, int argc, char **argv)
+{
+	struct mgmt_cp_load_long_term_keys cp;
+
+	if (index == MGMT_INDEX_NONE)
+		index = 0;
+
+	memset(&cp, 0, sizeof(cp));
+
+	if (mgmt_send(mgmt, MGMT_OP_LOAD_LONG_TERM_KEYS, index, sizeof(cp), &cp,
+						ltks_rsp, NULL, NULL) == 0) {
+		fprintf(stderr, "Unable to send load_ltks cmd\n");
+		exit(EXIT_FAILURE);
+	}
+}
+
+static void irks_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	if (status != 0)
+		fprintf(stderr, "Load IRKs failed with status 0x%02x (%s)\n",
+						status, mgmt_errstr(status));
+	else
+		printf("Identity Resolving Keys successfully loaded\n");
+
+	mainloop_quit();
+}
+
+static void cmd_irks(struct mgmt *mgmt, uint16_t index, int argc, char **argv)
+{
+	struct mgmt_cp_load_irks cp;
+
+	if (index == MGMT_INDEX_NONE)
+		index = 0;
+
+	memset(&cp, 0, sizeof(cp));
+
+	if (mgmt_send(mgmt, MGMT_OP_LOAD_IRKS, index, sizeof(cp), &cp,
+						irks_rsp, NULL, NULL) == 0) {
+		fprintf(stderr, "Unable to send load_irks cmd\n");
 		exit(EXIT_FAILURE);
 	}
 }
@@ -1906,6 +2131,100 @@ static void cmd_static_addr(struct mgmt *mgmt, uint16_t index,
 	}
 }
 
+static void cmd_debug_keys(struct mgmt *mgmt, uint16_t index,
+						int argc, char **argv)
+{
+	cmd_setting(mgmt, index, MGMT_OP_SET_DEBUG_KEYS, argc, argv);
+}
+
+static void conn_info_rsp(uint8_t status, uint16_t len, const void *param,
+							void *user_data)
+{
+	const struct mgmt_rp_get_conn_info *rp = param;	char addr[18];
+
+	if (len == 0 && status != 0) {
+		fprintf(stderr, "Get Conn Info failed, status 0x%02x (%s)\n",
+						status, mgmt_errstr(status));
+		goto done;
+	}
+
+	if (len < sizeof(*rp)) {
+		fprintf(stderr, "Unexpected Get Conn Info len %u\n", len);
+		goto done;
+	}
+
+	ba2str(&rp->addr.bdaddr, addr);
+
+	if (status != 0) {
+		fprintf(stderr, "Get Conn Info for %s (%s) failed. status 0x%02x (%s)\n",
+						addr, typestr(rp->addr.type),
+						status, mgmt_errstr(status));
+		goto done;
+	}
+
+	printf("Connection Information for %s (%s)\n",
+						addr, typestr(rp->addr.type));
+	printf("\tRSSI %d\n\tTX power %d\n\tmaximum TX power %d\n",
+				rp->rssi, rp->tx_power, rp->max_tx_power);
+
+done:
+	mainloop_quit();
+}
+
+static void conn_info_usage(void)
+{
+	printf("Usage: btmgmt conn-info [-t type] <remote address>\n");
+}
+
+static struct option conn_info_options[] = {
+	{ "help",	0, 0, 'h' },
+	{ "type",	1, 0, 't' },
+	{ 0, 0, 0, 0 }
+};
+
+static void cmd_conn_info(struct mgmt *mgmt, uint16_t index,
+						int argc, char **argv)
+{
+	struct mgmt_cp_get_conn_info cp;
+	uint8_t type = BDADDR_BREDR;
+	int opt;
+
+	while ((opt = getopt_long(argc, argv, "+t:h", conn_info_options,
+								NULL)) != -1) {
+		switch (opt) {
+		case 't':
+			type = strtol(optarg, NULL, 0);
+			break;
+		case 'h':
+		default:
+			conn_info_usage();
+			exit(EXIT_SUCCESS);
+		}
+	}
+
+	argc -= optind;
+	argv += optind;
+	optind = 0;
+
+	if (argc < 1) {
+		conn_info_usage();
+		exit(EXIT_FAILURE);
+	}
+
+	if (index == MGMT_INDEX_NONE)
+		index = 0;
+
+	memset(&cp, 0, sizeof(cp));
+	str2ba(argv[0], &cp.addr.bdaddr);
+	cp.addr.type = type;
+
+	if (mgmt_send(mgmt, MGMT_OP_GET_CONN_INFO, index, sizeof(cp), &cp,
+					conn_info_rsp, NULL, NULL) == 0) {
+		fprintf(stderr, "Unable to send get_conn_info cmd\n");
+		exit(EXIT_FAILURE);
+	}
+}
+
 static struct {
 	char *cmd;
 	void (*func)(struct mgmt *mgmt, uint16_t index, int argc, char **argv);
@@ -1927,6 +2246,7 @@ static struct {
 	{ "le",		cmd_le,		"Toggle LE support"		},
 	{ "advertising",cmd_advertising,"Toggle LE advertising",	},
 	{ "bredr",      cmd_bredr,      "Toggle BR/EDR support",	},
+	{ "privacy",	cmd_privacy,	"Toggle privacy support"	},
 	{ "class",	cmd_class,	"Set device major/minor class"	},
 	{ "disconnect", cmd_disconnect, "Disconnect device"		},
 	{ "con",	cmd_con,	"List connections"		},
@@ -1935,7 +2255,9 @@ static struct {
 	{ "pair",	cmd_pair,	"Pair with a remote device"	},
 	{ "cancelpair",	cmd_cancel_pair,"Cancel pairing"		},
 	{ "unpair",	cmd_unpair,	"Unpair device"			},
-	{ "keys",	cmd_keys,	"Load Keys"			},
+	{ "keys",	cmd_keys,	"Load Link Keys"		},
+	{ "ltks",	cmd_ltks,	"Load Long Term Keys"		},
+	{ "irks",	cmd_irks,	"Load Identity Resolving Keys"	},
 	{ "block",	cmd_block,	"Block Device"			},
 	{ "unblock",	cmd_unblock,	"Unblock Device"		},
 	{ "add-uuid",	cmd_add_uuid,	"Add UUID"			},
@@ -1944,6 +2266,8 @@ static struct {
 	{ "local-oob",	cmd_local_oob,	"Local OOB data"		},
 	{ "did",	cmd_did,	"Set Device ID"			},
 	{ "static-addr",cmd_static_addr,"Set static address"		},
+	{ "debug-keys",	cmd_debug_keys,	"Toogle debug keys"		},
+	{ "conn-info",	cmd_conn_info,	"Get connection information"	},
 	{ }
 };
 

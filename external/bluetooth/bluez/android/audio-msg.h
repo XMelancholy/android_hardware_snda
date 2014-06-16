@@ -26,14 +26,12 @@
 static const char BLUEZ_AUDIO_SK_PATH[] = "\0bluez_audio_socket";
 
 #define AUDIO_SERVICE_ID		0
+#define AUDIO_SERVICE_ID_MAX		AUDIO_SERVICE_ID
 
-#define AUDIO_STATUS_SUCCESS		0x00
+#define AUDIO_STATUS_SUCCESS		IPC_STATUS_SUCCESS
 #define AUDIO_STATUS_FAILED		0x01
 
-#define AUDIO_OP_STATUS			0x00
-struct audio_status {
-	uint8_t code;
-} __attribute__((packed));
+#define AUDIO_OP_STATUS			IPC_OP_STATUS
 
 #define AUDIO_OP_OPEN			0x01
 struct audio_preset {
@@ -63,6 +61,7 @@ struct audio_cmd_open_stream {
 } __attribute__((packed));
 
 struct audio_rsp_open_stream {
+	uint16_t mtu;
 	struct audio_preset preset[0];
 } __attribute__((packed));
 

@@ -47,7 +47,6 @@
 #include <bluetooth/hci_lib.h>
 
 #include "hciattach.h"
-#include "ppoll.h"
 
 struct uart_t {
 	char *type;
@@ -85,7 +84,7 @@ static void sig_alarm(int sig)
 	exit(1);
 }
 
-static int uart_speed(int s)
+int uart_speed(int s)
 {
 	switch (s) {
 	case 9600:
@@ -326,6 +325,11 @@ static int qualcomm(int fd, struct uart_t *u, struct termios *ti)
 static int intel(int fd, struct uart_t *u, struct termios *ti)
 {
 	return intel_init(fd, u->init_speed, &u->speed, ti);
+}
+
+static int bcm43xx(int fd, struct uart_t *u, struct termios *ti)
+{
+	return bcm43xx_init(fd, u->speed, ti, u->bdaddr);
 }
 
 static int read_check(int fd, void *buf, int count)
@@ -1076,10 +1080,6 @@ struct uart_t uart[] = {
 	{ "texasalt",   0x0000, 0x0000, HCI_UART_LL,   115200, 115200,
 				FLOW_CTL, DISABLE_PM, NULL, texasalt, NULL   },
 
-	/* ST-Ericsson CG2900 GPS FM Bluetooth combo controller */
-	{ "cg2900",     0x0000, 0x0000, HCI_UART_STE,  115200, 115200,
-				FLOW_CTL, DISABLE_PM, NULL, NULL     },
-
 	/* ST Microelectronics minikits based on STLC2410/STLC2415 */
 	{ "st",         0x0000, 0x0000, HCI_UART_H4,    57600, 115200,
 				FLOW_CTL, DISABLE_PM,  NULL, st       },
@@ -1140,6 +1140,10 @@ struct uart_t uart[] = {
 	{ "bcm2035",    0x0A5C, 0x2035, HCI_UART_H4,   115200, 460800,
 				FLOW_CTL, DISABLE_PM, NULL, bcm2035  },
 
+	/* Broadcom BCM43XX */
+	{ "bcm43xx",    0x0000, 0x0000, HCI_UART_H4,   115200, 3000000,
+				FLOW_CTL, DISABLE_PM, NULL, bcm43xx, NULL  },
+
 	{ "ath3k",    0x0000, 0x0000, HCI_UART_ATH3K, 115200, 115200,
 			FLOW_CTL, DISABLE_PM, NULL, ath3k_ps, ath3k_pm  },
 
@@ -1183,10 +1187,10 @@ static struct uart_t * get_by_type(char *type)
 }
 
 /* Initialize UART driver */
-static int init_uart(char *dev, struct uart_t *u, int send_break, int raw, int line_disc)
+static int init_uart(char *dev, struct uart_t *u, int send_break, int raw)
 {
 	struct termios ti;
-	int fd;
+	int fd, i;
 	unsigned long flags = 0;
 
 	if (raw)
@@ -1246,7 +1250,8 @@ static int init_uart(char *dev, struct uart_t *u, int send_break, int raw, int l
 	}
 
 	/* Set TTY to N_HCI line discipline */
-	if (ioctl(fd, TIOCSETD, &line_disc) < 0) {
+	i = N_HCI;
+	if (ioctl(fd, TIOCSETD, &i) < 0) {
 		perror("Can't set line discipline");
 		return -1;
 	}
@@ -1271,7 +1276,7 @@ static void usage(void)
 {
 	printf("hciattach - HCI UART driver initialization utility\n");
 	printf("Usage:\n");
-	printf("\thciattach [-n] [-p] [-a line_disc_nr] [-b] [-r] [-t timeout] [-s initial_speed] <tty> <type | id> [speed] [flow|noflow] [bdaddr]\n");
+	printf("\thciattach [-n] [-p] [-b] [-r] [-t timeout] [-s initial_speed] <tty> <type | id> [speed] [flow|noflow] [bdaddr]\n");
 	printf("\thciattach -l\n");
 }
 
@@ -1280,7 +1285,6 @@ int main(int argc, char *argv[])
 	struct uart_t *u = NULL;
 	int detach, printpid, raw, opt, i, n, ld, err;
 	int to = 10;
-	int line_disc = N_HCI;
 	int init_speed = 0;
 	int send_break = 0;
 	pid_t pid;
@@ -1293,11 +1297,8 @@ int main(int argc, char *argv[])
 	printpid = 0;
 	raw = 0;
 
-	while ((opt=getopt(argc, argv, "bnpt:s:lra:")) != EOF) {
+	while ((opt=getopt(argc, argv, "bnpt:s:lr")) != EOF) {
 		switch(opt) {
-		case 'a':
-			line_disc = atoi(optarg);
-			break;
 		case 'b':
 			send_break = 1;
 			break;
@@ -1413,7 +1414,7 @@ int main(int argc, char *argv[])
 	alarm(to);
 	bcsp_max_retries = to;
 
-	n = init_uart(dev, u, send_break, raw, line_disc);
+	n = init_uart(dev, u, send_break, raw);
 	if (n < 0) {
 		perror("Can't initialize device");
 		exit(1);

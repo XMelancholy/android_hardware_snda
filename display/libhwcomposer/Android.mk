@@ -16,7 +16,7 @@ LOCAL_PATH:= $(call my-dir)
 # HAL module implemenation, not prelinked and stored in
 # hw/<COPYPIX_HARDWARE_MODULE_ID>.<ro.product.board>.so
 GRALLOC_PATH := $(LOCAL_PATH)/../libgralloc
-MULTIMEDIA_PATH := $(LOCAL_PATH)/../../multimedia
+MULTIMEDIA_PATH := hardware/snda/include
 
 include $(CLEAR_VARS)
 LOCAL_C_INCLUDES := $(GRALLOC_PATH) $(MULTIMEDIA_PATH)

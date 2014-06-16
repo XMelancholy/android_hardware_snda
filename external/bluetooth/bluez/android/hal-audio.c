@@ -24,14 +24,31 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
 
 #include <hardware/audio.h>
 #include <hardware/hardware.h>
 
+#include <sbc/sbc.h>
+
 #include "audio-msg.h"
+#include "ipc-common.h"
 #include "hal-log.h"
 #include "hal-msg.h"
 #include "../profiles/audio/a2dp-codecs.h"
+#include "../src/shared/util.h"
+
+#define FIXED_A2DP_PLAYBACK_LATENCY_MS 25
+
+#define FIXED_BUFFER_SIZE (20 * 512)
+
+#define MAX_FRAMES_IN_PAYLOAD 15
+
+#define MAX_DELAY	100000 /* 100ms */
+
+#define SBC_QUALITY_MIN_BITPOOL	33
+#define SBC_QUALITY_STEP	5
 
 static const uint8_t a2dp_src_uuid[] = {
 		0x00, 0x00, 0x11, 0x0a, 0x00, 0x00, 0x10, 0x00,
@@ -39,11 +56,69 @@ static const uint8_t a2dp_src_uuid[] = {
 
 static int listen_sk = -1;
 static int audio_sk = -1;
-static bool close_thread = false;
 
 static pthread_t ipc_th = 0;
-static pthread_mutex_t close_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t sk_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+
+struct rtp_header {
+	unsigned cc:4;
+	unsigned x:1;
+	unsigned p:1;
+	unsigned v:2;
+
+	unsigned pt:7;
+	unsigned m:1;
+
+	uint16_t sequence_number;
+	uint32_t timestamp;
+	uint32_t ssrc;
+	uint32_t csrc[0];
+} __attribute__ ((packed));
+
+struct rtp_payload {
+	unsigned frame_count:4;
+	unsigned rfa0:1;
+	unsigned is_last_fragment:1;
+	unsigned is_first_fragment:1;
+	unsigned is_fragmented:1;
+} __attribute__ ((packed));
+
+#elif __BYTE_ORDER == __BIG_ENDIAN
+
+struct rtp_header {
+	unsigned v:2;
+	unsigned p:1;
+	unsigned x:1;
+	unsigned cc:4;
+
+	unsigned m:1;
+	unsigned pt:7;
+
+	uint16_t sequence_number;
+	uint32_t timestamp;
+	uint32_t ssrc;
+	uint32_t csrc[0];
+} __attribute__ ((packed));
+
+struct rtp_payload {
+	unsigned is_fragmented:1;
+	unsigned is_first_fragment:1;
+	unsigned is_last_fragment:1;
+	unsigned rfa0:1;
+	unsigned frame_count:4;
+} __attribute__ ((packed));
+
+#else
+#error "Unknown byte order"
+#endif
+
+struct media_packet {
+	struct rtp_header hdr;
+	struct rtp_payload payload;
+	uint8_t data[0];
+};
 
 struct audio_input_config {
 	uint32_t rate;
@@ -53,25 +128,94 @@ struct audio_input_config {
 
 struct sbc_data {
 	a2dp_sbc_t sbc;
+
+	sbc_t enc;
+
+	uint16_t payload_len;
+
+	size_t in_frame_len;
+	size_t in_buf_size;
+
+	size_t out_frame_len;
+
+	unsigned frame_duration;
+	unsigned frames_per_packet;
 };
 
+static void timespec_add(struct timespec *base, uint64_t time_us,
+							struct timespec *res)
+{
+	res->tv_sec = base->tv_sec + time_us / 1000000;
+	res->tv_nsec = base->tv_nsec + (time_us % 1000000) * 1000;
+
+	if (res->tv_nsec >= 1000000000) {
+		res->tv_sec++;
+		res->tv_nsec -= 1000000000;
+	}
+}
+
+static void timespec_diff(struct timespec *a, struct timespec *b,
+							struct timespec *res)
+{
+	res->tv_sec = a->tv_sec - b->tv_sec;
+	res->tv_nsec = a->tv_nsec - b->tv_nsec;
+
+	if (res->tv_nsec < 0) {
+		res->tv_sec--;
+		res->tv_nsec += 1000000000; /* 1sec */
+	}
+}
+
+static uint64_t timespec_diff_us(struct timespec *a, struct timespec *b)
+{
+	struct timespec res;
+
+	timespec_diff(a, b, &res);
+
+	return res.tv_sec * 1000000ll + res.tv_nsec / 1000ll;
+}
+
+#if defined(ANDROID)
+/*
+ * Bionic does not have clock_nanosleep() prototype in time.h even though
+ * it provides its implementation.
+ */
+extern int clock_nanosleep(clockid_t clock_id, int flags,
+					const struct timespec *request,
+					struct timespec *remain);
+#endif
+
 static int sbc_get_presets(struct audio_preset *preset, size_t *len);
-static int sbc_init(struct audio_preset *preset, void **codec_data);
+static int sbc_codec_init(struct audio_preset *preset, uint16_t mtu,
+							void **codec_data);
 static int sbc_cleanup(void *codec_data);
-static int sbc_get_config(void *codec_data,
-					struct audio_input_config *config);
+static int sbc_get_config(void *codec_data, struct audio_input_config *config);
+static size_t sbc_get_buffer_size(void *codec_data);
+static size_t sbc_get_mediapacket_duration(void *codec_data);
+static ssize_t sbc_encode_mediapacket(void *codec_data, const uint8_t *buffer,
+					size_t len, struct media_packet *mp,
+					size_t mp_data_len, size_t *written);
+static bool sbc_update_qos(void *codec_data, uint8_t op);
+
+#define QOS_POLICY_DEFAULT	0x00
+#define QOS_POLICY_DECREASE	0x01
 
 struct audio_codec {
 	uint8_t type;
 
 	int (*get_presets) (struct audio_preset *preset, size_t *len);
 
-	int (*init) (struct audio_preset *preset, void **codec_data);
+	int (*init) (struct audio_preset *preset, uint16_t mtu,
+				void **codec_data);
 	int (*cleanup) (void *codec_data);
 	int (*get_config) (void *codec_data,
 					struct audio_input_config *config);
-	ssize_t (*write_data) (void *codec_data, const void *buffer,
-				size_t bytes);
+	size_t (*get_buffer_size) (void *codec_data);
+	size_t (*get_mediapacket_duration) (void *codec_data);
+	ssize_t (*encode_mediapacket) (void *codec_data, const uint8_t *buffer,
+					size_t len, struct media_packet *mp,
+					size_t mp_data_len, size_t *written);
+	bool (*update_qos) (void *codec_data, uint8_t op);
 };
 
 static const struct audio_codec audio_codecs[] = {
@@ -80,9 +224,13 @@ static const struct audio_codec audio_codecs[] = {
 
 		.get_presets = sbc_get_presets,
 
-		.init = sbc_init,
+		.init = sbc_codec_init,
 		.cleanup = sbc_cleanup,
 		.get_config = sbc_get_config,
+		.get_buffer_size = sbc_get_buffer_size,
+		.get_mediapacket_duration = sbc_get_mediapacket_duration,
+		.encode_mediapacket = sbc_encode_mediapacket,
+		.update_qos = sbc_update_qos,
 	}
 };
 
@@ -95,6 +243,15 @@ struct audio_endpoint {
 	const struct audio_codec *codec;
 	void *codec_data;
 	int fd;
+
+	struct media_packet *mp;
+	size_t mp_data_len;
+
+	uint16_t seq;
+	uint32_t samples;
+	struct timespec start;
+
+	bool resync;
 };
 
 static struct audio_endpoint audio_endpoints[MAX_AUDIO_ENDPOINTS];
@@ -112,6 +269,8 @@ struct a2dp_stream_out {
 	struct audio_endpoint *ep;
 	enum a2dp_state_t audio_state;
 	struct audio_input_config cfg;
+
+	uint8_t *downmix_buf;
 };
 
 struct a2dp_audio_dev {
@@ -162,8 +321,6 @@ static int sbc_get_presets(struct audio_preset *preset, size_t *len)
 	uint8_t *ptr = (uint8_t *) preset;
 	size_t preset_size = sizeof(*preset) + sizeof(a2dp_sbc_t);
 
-	DBG("");
-
 	count = sizeof(sbc_presets) / sizeof(sbc_presets[0]);
 
 	for (i = 0; i < count; i++) {
@@ -184,20 +341,141 @@ static int sbc_get_presets(struct audio_preset *preset, size_t *len)
 	return i;
 }
 
-static int sbc_init(struct audio_preset *preset, void **codec_data)
+static int sbc_freq2int(uint8_t freq)
+{
+	switch (freq) {
+	case SBC_SAMPLING_FREQ_16000:
+		return 16000;
+	case SBC_SAMPLING_FREQ_32000:
+		return 32000;
+	case SBC_SAMPLING_FREQ_44100:
+		return 44100;
+	case SBC_SAMPLING_FREQ_48000:
+		return 48000;
+	default:
+		return 0;
+	}
+}
+
+static const char *sbc_mode2str(uint8_t mode)
+{
+	switch (mode) {
+	case SBC_CHANNEL_MODE_MONO:
+		return "Mono";
+	case SBC_CHANNEL_MODE_DUAL_CHANNEL:
+		return "DualChannel";
+	case SBC_CHANNEL_MODE_STEREO:
+		return "Stereo";
+	case SBC_CHANNEL_MODE_JOINT_STEREO:
+		return "JointStereo";
+	default:
+		return "(unknown)";
+	}
+}
+
+static int sbc_blocks2int(uint8_t blocks)
+{
+	switch (blocks) {
+	case SBC_BLOCK_LENGTH_4:
+		return 4;
+	case SBC_BLOCK_LENGTH_8:
+		return 8;
+	case SBC_BLOCK_LENGTH_12:
+		return 12;
+	case SBC_BLOCK_LENGTH_16:
+		return 16;
+	default:
+		return 0;
+	}
+}
+
+static int sbc_subbands2int(uint8_t subbands)
+{
+	switch (subbands) {
+	case SBC_SUBBANDS_4:
+		return 4;
+	case SBC_SUBBANDS_8:
+		return 8;
+	default:
+		return 0;
+	}
+}
+
+static const char *sbc_allocation2str(uint8_t allocation)
+{
+	switch (allocation) {
+	case SBC_ALLOCATION_SNR:
+		return "SNR";
+	case SBC_ALLOCATION_LOUDNESS:
+		return "Loudness";
+	default:
+		return "(unknown)";
+	}
+}
+
+static void sbc_init_encoder(struct sbc_data *sbc_data)
+{
+	a2dp_sbc_t *in = &sbc_data->sbc;
+	sbc_t *out = &sbc_data->enc;
+
+	sbc_init_a2dp(out, 0L, in, sizeof(*in));
+
+	out->endian = SBC_LE;
+	out->bitpool = in->max_bitpool;
+
+	DBG("frequency=%d channel_mode=%s block_length=%d subbands=%d "
+			"allocation=%s bitpool=%d-%d",
+			sbc_freq2int(in->frequency),
+			sbc_mode2str(in->channel_mode),
+			sbc_blocks2int(in->block_length),
+			sbc_subbands2int(in->subbands),
+			sbc_allocation2str(in->allocation_method),
+			in->min_bitpool, in->max_bitpool);
+}
+
+static void sbc_codec_calculate(struct sbc_data *sbc_data)
+{
+	size_t in_frame_len;
+	size_t out_frame_len;
+	size_t num_frames;
+
+	in_frame_len = sbc_get_codesize(&sbc_data->enc);
+	out_frame_len = sbc_get_frame_length(&sbc_data->enc);
+	num_frames = sbc_data->payload_len / out_frame_len;
+
+	sbc_data->in_frame_len = in_frame_len;
+	sbc_data->in_buf_size = num_frames * in_frame_len;
+
+	sbc_data->out_frame_len = out_frame_len;
+
+	sbc_data->frame_duration = sbc_get_frame_duration(&sbc_data->enc);
+	sbc_data->frames_per_packet = num_frames;
+
+	DBG("in_frame_len=%zu out_frame_len=%zu frames_per_packet=%zu",
+				in_frame_len, out_frame_len, num_frames);
+}
+
+static int sbc_codec_init(struct audio_preset *preset, uint16_t payload_len,
+							void **codec_data)
 {
 	struct sbc_data *sbc_data;
 
-	DBG("");
-
 	if (preset->len != sizeof(a2dp_sbc_t)) {
-		DBG("preset size mismatch");
+		error("SBC: preset size mismatch");
 		return AUDIO_STATUS_FAILED;
 	}
 
 	sbc_data = calloc(sizeof(struct sbc_data), 1);
+	if (!sbc_data)
+		return AUDIO_STATUS_FAILED;
 
 	memcpy(&sbc_data->sbc, preset->data, preset->len);
+
+	sbc_init_encoder(sbc_data);
+
+	sbc_data->payload_len = payload_len;
+
+	sbc_codec_calculate(sbc_data);
 
 	*codec_data = sbc_data;
 
@@ -206,15 +484,15 @@ static int sbc_init(struct audio_preset *preset, void **codec_data)
 
 static int sbc_cleanup(void *codec_data)
 {
-	DBG("");
+	struct sbc_data *sbc_data = (struct sbc_data *) codec_data;
 
+	sbc_finish(&sbc_data->enc);
 	free(codec_data);
 
 	return AUDIO_STATUS_SUCCESS;
 }
 
-static int sbc_get_config(void *codec_data,
-					struct audio_input_config *config)
+static int sbc_get_config(void *codec_data, struct audio_input_config *config)
 {
 	struct sbc_data *sbc_data = (struct sbc_data *) codec_data;
 
@@ -242,12 +520,86 @@ static int sbc_get_config(void *codec_data,
 	return AUDIO_STATUS_SUCCESS;
 }
 
-static void audio_ipc_cleanup(void)
+static size_t sbc_get_buffer_size(void *codec_data)
 {
-	if (audio_sk >= 0) {
-		shutdown(audio_sk, SHUT_RDWR);
-		audio_sk = -1;
+	struct sbc_data *sbc_data = (struct sbc_data *) codec_data;
+
+	return sbc_data->in_buf_size;
+}
+
+static size_t sbc_get_mediapacket_duration(void *codec_data)
+{
+	struct sbc_data *sbc_data = (struct sbc_data *) codec_data;
+
+	return sbc_data->frame_duration * sbc_data->frames_per_packet;
+}
+
+static ssize_t sbc_encode_mediapacket(void *codec_data, const uint8_t *buffer,
+					size_t len, struct media_packet *mp,
+					size_t mp_data_len, size_t *written)
+{
+	struct sbc_data *sbc_data = (struct sbc_data *) codec_data;
+	size_t consumed = 0;
+	size_t encoded = 0;
+	uint8_t frame_count = 0;
+
+	while (len - consumed >= sbc_data->in_frame_len &&
+			mp_data_len - encoded >= sbc_data->out_frame_len &&
+			frame_count < MAX_FRAMES_IN_PAYLOAD) {
+		ssize_t read;
+		ssize_t written = 0;
+
+		read = sbc_encode(&sbc_data->enc, buffer + consumed,
+				sbc_data->in_frame_len, mp->data + encoded,
+				mp_data_len - encoded, &written);
+
+		if (read < 0) {
+			error("SBC: failed to encode block at frame %d (%zd)",
+							frame_count, read);
+			break;
+		}
+
+		frame_count++;
+		consumed += read;
+		encoded += written;
 	}
+
+	*written = encoded;
+	mp->payload.frame_count = frame_count;
+
+	return consumed;
+}
+
+static bool sbc_update_qos(void *codec_data, uint8_t op)
+{
+	struct sbc_data *sbc_data = (struct sbc_data *) codec_data;
+	uint8_t curr_bitpool = sbc_data->enc.bitpool;
+	uint8_t new_bitpool = curr_bitpool;
+
+	switch (op) {
+	case QOS_POLICY_DEFAULT:
+		new_bitpool = sbc_data->sbc.max_bitpool;
+		break;
+
+	case QOS_POLICY_DECREASE:
+		if (curr_bitpool > SBC_QUALITY_MIN_BITPOOL) {
+			new_bitpool = curr_bitpool - SBC_QUALITY_STEP;
+			if (new_bitpool < SBC_QUALITY_MIN_BITPOOL)
+				new_bitpool = SBC_QUALITY_MIN_BITPOOL;
+		}
+		break;
+	}
+
+	if (new_bitpool == curr_bitpool)
+		return false;
+
+	sbc_data->enc.bitpool = new_bitpool;
+
+	sbc_codec_calculate(sbc_data);
+
+	info("SBC: bitpool changed: %d -> %d", curr_bitpool, new_bitpool);
+
+	return true;
 }
 
 static int audio_ipc_cmd(uint8_t service_id, uint8_t opcode, uint16_t len,
@@ -256,10 +608,12 @@ static int audio_ipc_cmd(uint8_t service_id, uint8_t opcode, uint16_t len,
 	ssize_t ret;
 	struct msghdr msg;
 	struct iovec iv[2];
-	struct hal_hdr cmd;
+	struct ipc_hdr cmd;
 	char cmsgbuf[CMSG_SPACE(sizeof(int))];
-	struct hal_status s;
+	struct ipc_status s;
 	size_t s_len = sizeof(s);
+
+	pthread_mutex_lock(&sk_mutex);
 
 	if (audio_sk < 0) {
 		error("audio: Invalid cmd socket passed to audio_ipc_cmd");
@@ -288,12 +642,9 @@ static int audio_ipc_cmd(uint8_t service_id, uint8_t opcode, uint16_t len,
 	msg.msg_iov = iv;
 	msg.msg_iovlen = 2;
 
-	pthread_mutex_lock(&sk_mutex);
-
 	ret = sendmsg(audio_sk, &msg, 0);
 	if (ret < 0) {
 		error("audio: Sending command failed:%s", strerror(errno));
-		pthread_mutex_unlock(&sk_mutex);
 		goto failed;
 	}
 
@@ -325,11 +676,8 @@ static int audio_ipc_cmd(uint8_t service_id, uint8_t opcode, uint16_t len,
 	if (ret < 0) {
 		error("audio: Receiving command response failed:%s",
 							strerror(errno));
-		pthread_mutex_unlock(&sk_mutex);
 		goto failed;
 	}
-
-	pthread_mutex_unlock(&sk_mutex);
 
 	if (ret < (ssize_t) sizeof(cmd)) {
 		error("audio: Too small response received(%zd bytes)", ret);
@@ -354,7 +702,7 @@ static int audio_ipc_cmd(uint8_t service_id, uint8_t opcode, uint16_t len,
 	}
 
 	if (cmd.opcode == AUDIO_OP_STATUS) {
-		struct hal_status *s = rsp;
+		struct ipc_status *s = rsp;
 
 		if (sizeof(*s) != cmd.len) {
 			error("audio: Invalid status length");
@@ -366,8 +714,12 @@ static int audio_ipc_cmd(uint8_t service_id, uint8_t opcode, uint16_t len,
 			goto failed;
 		}
 
+		pthread_mutex_unlock(&sk_mutex);
+
 		return s->code;
 	}
+
+	pthread_mutex_unlock(&sk_mutex);
 
 	/* Receive auxiliary data in msg */
 	if (fd) {
@@ -383,6 +735,9 @@ static int audio_ipc_cmd(uint8_t service_id, uint8_t opcode, uint16_t len,
 				break;
 			}
 		}
+
+		if (*fd < 0)
+			goto failed;
 	}
 
 	if (rsp_len)
@@ -393,7 +748,8 @@ static int audio_ipc_cmd(uint8_t service_id, uint8_t opcode, uint16_t len,
 failed:
 	/* Some serious issue happen on IPC - recover */
 	shutdown(audio_sk, SHUT_RDWR);
-	audio_sk = -1;
+	pthread_mutex_unlock(&sk_mutex);
+
 	return AUDIO_STATUS_FAILED;
 }
 
@@ -439,8 +795,8 @@ static int ipc_close_cmd(uint8_t endpoint_id)
 	return result;
 }
 
-static int ipc_open_stream_cmd(uint8_t endpoint_id,
-					struct audio_preset **caps)
+static int ipc_open_stream_cmd(uint8_t endpoint_id, uint16_t *mtu, int *fd,
+						struct audio_preset **caps)
 {
 	char buf[BLUEZ_AUDIO_MTU];
 	struct audio_cmd_open_stream cmd;
@@ -457,11 +813,11 @@ static int ipc_open_stream_cmd(uint8_t endpoint_id,
 	cmd.id = endpoint_id;
 
 	result = audio_ipc_cmd(AUDIO_SERVICE_ID, AUDIO_OP_OPEN_STREAM,
-				sizeof(cmd), &cmd, &rsp_len, rsp, NULL);
-
+				sizeof(cmd), &cmd, &rsp_len, rsp, fd);
 	if (result == AUDIO_STATUS_SUCCESS) {
 		size_t buf_len = sizeof(struct audio_preset) +
 					rsp->preset[0].len;
+		*mtu = rsp->mtu;
 		*caps = malloc(buf_len);
 		memcpy(*caps, &rsp->preset, buf_len);
 	} else {
@@ -481,7 +837,7 @@ static int ipc_close_stream_cmd(uint8_t endpoint_id)
 	cmd.id = endpoint_id;
 
 	result = audio_ipc_cmd(AUDIO_SERVICE_ID, AUDIO_OP_CLOSE_STREAM,
-				sizeof(cmd), &cmd, NULL, NULL, NULL);
+					sizeof(cmd), &cmd, NULL, NULL, NULL);
 
 	return result;
 }
@@ -496,7 +852,7 @@ static int ipc_resume_stream_cmd(uint8_t endpoint_id)
 	cmd.id = endpoint_id;
 
 	result = audio_ipc_cmd(AUDIO_SERVICE_ID, AUDIO_OP_RESUME_STREAM,
-				sizeof(cmd), &cmd, NULL, NULL, NULL);
+					sizeof(cmd), &cmd, NULL, NULL, NULL);
 
 	return result;
 }
@@ -511,7 +867,7 @@ static int ipc_suspend_stream_cmd(uint8_t endpoint_id)
 	cmd.id = endpoint_id;
 
 	result = audio_ipc_cmd(AUDIO_SERVICE_ID, AUDIO_OP_SUSPEND_STREAM,
-				sizeof(cmd), &cmd, NULL, NULL, NULL);
+					sizeof(cmd), &cmd, NULL, NULL, NULL);
 
 	return result;
 }
@@ -551,27 +907,309 @@ static void unregister_endpoints(void)
 	}
 }
 
+static bool open_endpoint(struct audio_endpoint *ep,
+						struct audio_input_config *cfg)
+{
+	struct audio_preset *preset;
+	const struct audio_codec *codec;
+	uint16_t mtu;
+	uint16_t payload_len;
+	int fd;
+
+	if (ipc_open_stream_cmd(ep->id, &mtu, &fd, &preset) !=
+							AUDIO_STATUS_SUCCESS)
+		return false;
+
+	DBG("mtu=%u", mtu);
+
+	payload_len = mtu - sizeof(*ep->mp);
+
+	ep->fd = fd;
+
+	codec = ep->codec;
+	codec->init(preset, payload_len, &ep->codec_data);
+	codec->get_config(ep->codec_data, cfg);
+
+	ep->mp = calloc(mtu, 1);
+	if (!ep->mp)
+		goto failed;
+	ep->mp->hdr.v = 2;
+	ep->mp->hdr.pt = 1;
+	ep->mp->hdr.ssrc = htonl(1);
+
+	ep->mp_data_len = payload_len;
+
+	free(preset);
+
+	return true;
+
+failed:
+	close(fd);
+	free(preset);
+
+	return false;
+}
+
+static void close_endpoint(struct audio_endpoint *ep)
+{
+	ipc_close_stream_cmd(ep->id);
+	if (ep->fd >= 0) {
+		close(ep->fd);
+		ep->fd = -1;
+	}
+
+	free(ep->mp);
+
+	ep->codec->cleanup(ep->codec_data);
+	ep->codec_data = NULL;
+}
+
+static bool resume_endpoint(struct audio_endpoint *ep)
+{
+	if (ipc_resume_stream_cmd(ep->id) != AUDIO_STATUS_SUCCESS)
+		return false;
+
+	ep->samples = 0;
+	ep->resync = false;
+
+	ep->codec->update_qos(ep->codec_data, QOS_POLICY_DEFAULT);
+
+	return true;
+}
+
+static void downmix_to_mono(struct a2dp_stream_out *out, const uint8_t *buffer,
+								size_t bytes)
+{
+	const int16_t *input = (const void *) buffer;
+	int16_t *output = (void *) out->downmix_buf;
+	size_t i;
+
+	for (i = 0; i < bytes / 2; i++) {
+		int16_t l = le16_to_cpu(get_unaligned(&input[i * 2]));
+		int16_t r = le16_to_cpu(get_unaligned(&input[i * 2 + 1]));
+
+		put_unaligned(cpu_to_le16((l + r) / 2), &output[i]);
+	}
+}
+
+static bool wait_for_endpoint(struct audio_endpoint *ep, bool *writable)
+{
+	int ret;
+
+	while (true) {
+		struct pollfd pollfd;
+
+		pollfd.fd = ep->fd;
+		pollfd.events = POLLOUT;
+		pollfd.revents = 0;
+
+		ret = poll(&pollfd, 1, 500);
+
+		if (ret >= 0) {
+			*writable = !!(pollfd.revents & POLLOUT);
+			break;
+		}
+
+		if (errno != EINTR) {
+			ret = errno;
+			error("poll failed (%d)", ret);
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static bool write_to_endpoint(struct audio_endpoint *ep, size_t bytes)
+{
+	struct media_packet *mp = (struct media_packet *) ep->mp;
+	int ret;
+
+	while (true) {
+		ret = write(ep->fd, mp, sizeof(*mp) + bytes);
+
+		if (ret >= 0)
+			break;
+
+		/*
+		 * this should not happen so let's issue warning, but do not
+		 * fail, we can try to write next packet
+		 */
+		if (errno == EAGAIN) {
+			ret = errno;
+			warn("write failed (%d)", ret);
+			break;
+		}
+
+		if (errno != EINTR) {
+			ret = errno;
+			error("write failed (%d)", ret);
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static bool write_data(struct a2dp_stream_out *out, const void *buffer,
+								size_t bytes)
+{
+	struct audio_endpoint *ep = out->ep;
+	struct media_packet *mp = (struct media_packet *) ep->mp;
+	size_t free_space = ep->mp_data_len;
+	size_t consumed = 0;
+
+	while (consumed < bytes) {
+		size_t written = 0;
+		ssize_t read;
+		uint32_t samples;
+		int ret;
+		struct timespec current;
+		uint64_t audio_sent, audio_passed;
+		bool do_write = false;
+
+		/*
+		 * prepare media packet in advance so we don't waste time after
+		 * wakeup
+		 */
+		mp->hdr.sequence_number = htons(ep->seq++);
+		mp->hdr.timestamp = htonl(ep->samples);
+		read = ep->codec->encode_mediapacket(ep->codec_data,
+						buffer + consumed,
+						bytes - consumed, mp,
+						free_space, &written);
+
+		/*
+		 * not much we can do here, let's just ignore remaining
+		 * data and continue
+		 */
+		if (read <= 0)
+			return true;
+
+		/* calculate where are we and where we should be */
+		clock_gettime(CLOCK_MONOTONIC, &current);
+		if (!ep->samples)
+			memcpy(&ep->start, &current, sizeof(ep->start));
+		audio_sent = ep->samples * 1000000ll / out->cfg.rate;
+		audio_passed = timespec_diff_us(&current, &ep->start);
+
+		/*
+		 * if we're ahead of stream then wait for next write point,
+		 * if we're lagging more than 100ms then stop writing and just
+		 * skip data until we're back in sync
+		 */
+		if (audio_sent > audio_passed) {
+			struct timespec anchor;
+
+			ep->resync = false;
+
+			timespec_add(&ep->start, audio_sent, &anchor);
+
+			while (true) {
+				ret = clock_nanosleep(CLOCK_MONOTONIC,
+							TIMER_ABSTIME, &anchor,
+							NULL);
+
+				if (!ret)
+					break;
+
+				if (ret != EINTR) {
+					error("clock_nanosleep failed (%d)",
+									ret);
+					return false;
+				}
+			}
+		} else if (!ep->resync) {
+			uint64_t diff = audio_passed - audio_sent;
+
+			if (diff > MAX_DELAY) {
+				warn("lag is %jums, resyncing", diff / 1000);
+
+				ep->codec->update_qos(ep->codec_data,
+							QOS_POLICY_DECREASE);
+				ep->resync = true;
+			}
+		}
+
+		/* in resync mode we'll just drop mediapackets */
+		if (!ep->resync) {
+			/* wait some time for socket to be ready for write,
+			 * but we'll just skip writing data if timeout occurs
+			 */
+			if (!wait_for_endpoint(ep, &do_write))
+				return false;
+
+			if (do_write)
+				if (!write_to_endpoint(ep, written))
+					return false;
+		}
+
+		/*
+		 * AudioFlinger provides 16bit PCM, so sample size is 2 bytes
+		 * multiplied by number of channels. Number of channels is
+		 * simply number of bits set in channels mask.
+		 */
+		samples = read / (2 * popcount(out->cfg.channels));
+		ep->samples += samples;
+		consumed += read;
+	}
+
+	return true;
+}
+
 static ssize_t out_write(struct audio_stream_out *stream, const void *buffer,
 								size_t bytes)
 {
 	struct a2dp_stream_out *out = (struct a2dp_stream_out *) stream;
+	const void *in_buf = buffer;
+	size_t in_len = bytes;
+
+	/* just return in case we're closing */
+	if (out->audio_state == AUDIO_A2DP_STATE_NONE)
+		return -1;
 
 	/* We can auto-start only from standby */
 	if (out->audio_state == AUDIO_A2DP_STATE_STANDBY) {
 		DBG("stream in standby, auto-start");
 
-		if (ipc_resume_stream_cmd(out->ep->id) != AUDIO_STATUS_SUCCESS)
+		if (!resume_endpoint(out->ep))
 			return -1;
 
 		out->audio_state = AUDIO_A2DP_STATE_STARTED;
 	}
 
 	if (out->audio_state != AUDIO_A2DP_STATE_STARTED) {
-		DBG("stream not started");
+		error("audio: stream not started");
 		return -1;
 	}
 
-	/* TODO: encode data using codec */
+	if (out->ep->fd < 0) {
+		error("audio: no transport socket");
+		return -1;
+	}
+
+	/*
+	 * currently Android audioflinger is not able to provide mono stream on
+	 * A2DP output so down mixing needs to be done in hal-audio plugin.
+	 *
+	 * for reference see
+	 * AudioFlinger::PlaybackThread::readOutputParameters()
+	 * frameworks/av/services/audioflinger/Threads.cpp:1631
+	 */
+	if (out->cfg.channels == AUDIO_CHANNEL_OUT_MONO) {
+		if (!out->downmix_buf) {
+			error("audio: downmix buffer not initialized");
+			return -1;
+		}
+
+		downmix_to_mono(out, buffer, bytes);
+
+		in_buf = out->downmix_buf;
+		in_len = bytes / 2;
+	}
+
+	if (!write_data(out, in_buf, in_len))
+		return -1;
 
 	return bytes;
 }
@@ -592,7 +1230,7 @@ static int out_set_sample_rate(struct audio_stream *stream, uint32_t rate)
 	DBG("");
 
 	if (rate != out->cfg.rate) {
-		DBG("cannot set sample rate to %d", rate);
+		warn("audio: cannot set sample rate to %d", rate);
 		return -1;
 	}
 
@@ -602,16 +1240,27 @@ static int out_set_sample_rate(struct audio_stream *stream, uint32_t rate)
 static size_t out_get_buffer_size(const struct audio_stream *stream)
 {
 	DBG("");
-	return 20 * 512;
+
+	/*
+	 * We should return proper buffer size calculated by codec (so each
+	 * input buffer is encoded into single media packed) but this does not
+	 * work well with AudioFlinger and causes problems. For this reason we
+	 * use magic value here and out_write code takes care of splitting
+	 * input buffer into multiple media packets.
+	 */
+	return FIXED_BUFFER_SIZE;
 }
 
 static uint32_t out_get_channels(const struct audio_stream *stream)
 {
-	struct a2dp_stream_out *out = (struct a2dp_stream_out *) stream;
-
 	DBG("");
 
-	return out->cfg.channels;
+	/*
+	 * AudioFlinger can only provide stereo stream, so we return it here and
+	 * later we'll downmix this to mono in case codec requires it
+	 */
+
+	return AUDIO_CHANNEL_OUT_STEREO;
 }
 
 static audio_format_t out_get_format(const struct audio_stream *stream)
@@ -662,6 +1311,9 @@ static int out_set_parameters(struct audio_stream *stream, const char *kvpairs)
 	DBG("%s", kvpairs);
 
 	str = strdup(kvpairs);
+	if (!str)
+		return -ENOMEM;
+
 	kvpair = strtok_r(str, ";", &saveptr);
 
 	for (; kvpair && *kvpair; kvpair = strtok_r(NULL, ";", &saveptr)) {
@@ -708,8 +1360,15 @@ static char *out_get_parameters(const struct audio_stream *stream,
 
 static uint32_t out_get_latency(const struct audio_stream_out *stream)
 {
+	struct a2dp_stream_out *out = (struct a2dp_stream_out *) stream;
+	struct audio_endpoint *ep = out->ep;
+	size_t pkt_duration;
+
 	DBG("");
-	return 0;
+
+	pkt_duration = ep->codec->get_mediapacket_duration(ep->codec_data);
+
+	return FIXED_A2DP_PLAYBACK_LATENCY_MS + pkt_duration / 1000;
 }
 
 static int out_set_volume(struct audio_stream_out *stream, float left,
@@ -845,8 +1504,6 @@ static int audio_open_output_stream(struct audio_hw_device *dev,
 {
 	struct a2dp_audio_dev *a2dp_dev = (struct a2dp_audio_dev *) dev;
 	struct a2dp_stream_out *out;
-	struct audio_preset *preset;
-	const struct audio_codec *codec;
 
 	out = calloc(1, sizeof(struct a2dp_stream_out));
 	if (!out)
@@ -874,21 +1531,17 @@ static int audio_open_output_stream(struct audio_hw_device *dev,
 	/* TODO: for now we always use endpoint 0 */
 	out->ep = &audio_endpoints[0];
 
-	if (ipc_open_stream_cmd(out->ep->id, &preset) != AUDIO_STATUS_SUCCESS)
+	if (!open_endpoint(out->ep, &out->cfg))
 		goto fail;
-
-	if (!preset)
-		goto fail;
-
-	codec = out->ep->codec;
-
-	codec->init(preset, &out->ep->codec_data);
-	codec->get_config(out->ep->codec_data, &out->cfg);
 
 	DBG("rate=%d channels=%d format=%d", out->cfg.rate,
-			out->cfg.channels, out->cfg.format);
+					out->cfg.channels, out->cfg.format);
 
-	free(preset);
+	if (out->cfg.channels == AUDIO_CHANNEL_OUT_MONO) {
+		out->downmix_buf = malloc(FIXED_BUFFER_SIZE / 2);
+		if (!out->downmix_buf)
+			goto fail;
+	}
 
 	*stream_out = &out->stream;
 	a2dp_dev->out = out;
@@ -898,6 +1551,7 @@ static int audio_open_output_stream(struct audio_hw_device *dev,
 	return 0;
 
 fail:
+	error("audio: cannot open output stream");
 	free(out);
 	*stream_out = NULL;
 	return -EIO;
@@ -907,14 +1561,13 @@ static void audio_close_output_stream(struct audio_hw_device *dev,
 					struct audio_stream_out *stream)
 {
 	struct a2dp_audio_dev *a2dp_dev = (struct a2dp_audio_dev *) dev;
-	struct audio_endpoint *ep = a2dp_dev->out->ep;
+	struct a2dp_stream_out *out = (struct a2dp_stream_out *) stream;
 
 	DBG("");
 
-	ipc_close_stream_cmd(ep->id);
+	close_endpoint(a2dp_dev->out->ep);
 
-	ep->codec->cleanup(ep->codec_data);
-	ep->codec_data = NULL;
+	free(out->downmix_buf);
 
 	free(stream);
 	a2dp_dev->out = NULL;
@@ -932,7 +1585,7 @@ static int audio_set_parameters(struct audio_hw_device *dev,
 		return 0;
 
 	return out->stream.common.set_parameters((struct audio_stream *) out,
-							kvpairs);
+								kvpairs);
 }
 
 static char *audio_get_parameters(const struct audio_hw_device *dev,
@@ -1039,10 +1692,10 @@ static int audio_close(hw_device_t *device)
 
 	DBG("");
 
-	pthread_mutex_lock(&close_mutex);
-	audio_ipc_cleanup();
-	close_thread = true;
-	pthread_mutex_unlock(&close_mutex);
+	unregister_endpoints();
+
+	shutdown(listen_sk, SHUT_RDWR);
+	shutdown(audio_sk, SHUT_RDWR);
 
 	pthread_join(ipc_th, NULL);
 
@@ -1057,18 +1710,30 @@ static void *ipc_handler(void *data)
 {
 	bool done = false;
 	struct pollfd pfd;
+	int sk;
 
 	DBG("");
 
 	while (!done) {
 		DBG("Waiting for connection ...");
-		audio_sk = accept(listen_sk, NULL, NULL);
-		if (audio_sk < 0) {
+
+		sk = accept(listen_sk, NULL, NULL);
+		if (sk < 0) {
 			int err = errno;
-			error("audio: Failed to accept socket: %d (%s)", err,
-								strerror(err));
-			continue;
+
+			if (err == EINTR)
+				continue;
+
+			if (err != ECONNABORTED && err != EINVAL)
+				error("audio: Failed to accept socket: %d (%s)",
+							err, strerror(err));
+
+			break;
 		}
+
+		pthread_mutex_lock(&sk_mutex);
+		audio_sk = sk;
+		pthread_mutex_unlock(&sk_mutex);
 
 		DBG("Audio IPC: Connected");
 
@@ -1077,7 +1742,12 @@ static void *ipc_handler(void *data)
 
 			unregister_endpoints();
 
+			pthread_mutex_lock(&sk_mutex);
 			shutdown(audio_sk, SHUT_RDWR);
+			close(audio_sk);
+			audio_sk = -1;
+			pthread_mutex_unlock(&sk_mutex);
+
 			continue;
 		}
 
@@ -1090,17 +1760,16 @@ static void *ipc_handler(void *data)
 
 		if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) {
 			info("Audio HAL: Socket closed");
-			audio_sk = -1;
-		}
 
-		/*Check if audio_dev is closed */
-		pthread_mutex_lock(&close_mutex);
-		done = close_thread;
-		close_thread = false;
-		pthread_mutex_unlock(&close_mutex);
+			pthread_mutex_lock(&sk_mutex);
+			close(audio_sk);
+			audio_sk = -1;
+			pthread_mutex_unlock(&sk_mutex);
+		}
 	}
 
-	unregister_endpoints();
+	/* audio_sk is closed at this point, just cleanup endpoints states */
+	memset(audio_endpoints, 0, sizeof(audio_endpoints));
 
 	info("Closing Audio IPC thread");
 	return NULL;
@@ -1116,9 +1785,9 @@ static int audio_ipc_init(void)
 
 	sk = socket(PF_LOCAL, SOCK_SEQPACKET, 0);
 	if (sk < 0) {
-		err = errno;
-		error("audio: Failed to create socket: %d (%s)", err,
-								strerror(err));
+		err = -errno;
+		error("audio: Failed to create socket: %d (%s)", -err,
+								strerror(-err));
 		return err;
 	}
 
@@ -1129,16 +1798,16 @@ static int audio_ipc_init(void)
 					sizeof(BLUEZ_AUDIO_SK_PATH));
 
 	if (bind(sk, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
-		err = errno;
-		error("audio: Failed to bind socket: %d (%s)", err,
-								strerror(err));
+		err = -errno;
+		error("audio: Failed to bind socket: %d (%s)", -err,
+								strerror(-err));
 		goto failed;
 	}
 
 	if (listen(sk, 1) < 0) {
-		err = errno;
-		error("audio: Failed to listen on the socket: %d (%s)", err,
-								strerror(err));
+		err = -errno;
+		error("audio: Failed to listen on the socket: %d (%s)", -err,
+								strerror(-err));
 		goto failed;
 	}
 
@@ -1149,7 +1818,7 @@ static int audio_ipc_init(void)
 		err = -err;
 		ipc_th = 0;
 		error("audio: Failed to start Audio IPC thread: %d (%s)",
-							err, strerror(err));
+							-err, strerror(-err));
 		goto failed;
 	}
 
@@ -1175,8 +1844,8 @@ static int audio_open(const hw_module_t *module, const char *name,
 	}
 
 	err = audio_ipc_init();
-	if (err)
-		return -err;
+	if (err < 0)
+		return err;
 
 	a2dp_dev = calloc(1, sizeof(struct a2dp_audio_dev));
 	if (!a2dp_dev)
@@ -1202,9 +1871,11 @@ static int audio_open(const hw_module_t *module, const char *name,
 	a2dp_dev->dev.close_input_stream = audio_close_input_stream;
 	a2dp_dev->dev.dump = audio_dump;
 
-	/* Note that &a2dp_dev->dev.common is the same pointer as a2dp_dev.
+	/*
+	 * Note that &a2dp_dev->dev.common is the same pointer as a2dp_dev.
 	 * This results from the structure of following structs:a2dp_audio_dev,
-	 * audio_hw_device. We will rely on this later in the code.*/
+	 * audio_hw_device. We will rely on this later in the code.
+	 */
 	*device = &a2dp_dev->dev.common;
 
 	return 0;
@@ -1216,12 +1887,12 @@ static struct hw_module_methods_t hal_module_methods = {
 
 struct audio_module HAL_MODULE_INFO_SYM = {
 	.common = {
-	.tag = HARDWARE_MODULE_TAG,
-	.version_major = 1,
-	.version_minor = 0,
-	.id = AUDIO_HARDWARE_MODULE_ID,
-	.name = "A2DP Bluez HW HAL",
-	.author = "Intel Corporation",
-	.methods = &hal_module_methods,
+		.tag = HARDWARE_MODULE_TAG,
+		.version_major = 1,
+		.version_minor = 0,
+		.id = AUDIO_HARDWARE_MODULE_ID,
+		.name = "A2DP Bluez HW HAL",
+		.author = "Intel Corporation",
+		.methods = &hal_module_methods,
 	},
 };

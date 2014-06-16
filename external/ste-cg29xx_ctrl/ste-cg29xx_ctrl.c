@@ -123,7 +123,7 @@ static void sig_terminated(int sig)
  * @param [in] speed	UART baudrate (integer).
  * @return UART baudrate (define).
  */
-static int convert_uart_speed(int speed)
+int convert_uart_speed(int speed)
 {
 	switch (speed) {
 	case 9600:		return B9600;

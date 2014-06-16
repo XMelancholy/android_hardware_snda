@@ -1,6 +1,6 @@
 A2DP_USES_STANDARD_ANDROID_PATH := true
 
-MULTIMEDIA_PATH := $(LOCAL_PATH)/../../multimedia
+MULTIMEDIA_PATH := hardware/snda/include
 
 $(shell mkdir -p $(TARGET_OUT_INTERMEDIATES)/SHARED_LIBRARIES/libste_adm_intermediates)
 $(shell touch $(TARGET_OUT_INTERMEDIATES)/SHARED_LIBRARIES/libste_adm_intermediates/export_includes)

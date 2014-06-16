@@ -32,14 +32,17 @@
 
 const struct interface *interfaces[] = {
 	&audio_if,
+	&sco_if,
 	&bluetooth_if,
 	&av_if,
+	&rc_if,
 	&gatt_if,
 	&gatt_client_if,
 	&gatt_server_if,
 	&hf_if,
 	&hh_if,
 	&pan_if,
+	&hl_if,
 	&sock_if,
 	NULL
 };
@@ -253,12 +256,12 @@ static int command_line_to_argv(char *line_buffer, char *argv[], int argv_size)
 
 static void process_line(char *line_buffer)
 {
-	char *argv[10];
+	char *argv[50];
 	int argc;
 	int i = 0;
 	struct method *m;
 
-	argc = command_line_to_argv(line_buffer, argv, 10);
+	argc = command_line_to_argv(line_buffer, argv, 50);
 	if (argc < 1)
 		return;
 
@@ -382,6 +385,7 @@ static void init(void)
 	static const char * const inames[] = {
 		BT_PROFILE_HANDSFREE_ID,
 		BT_PROFILE_ADVANCED_AUDIO_ID,
+		BT_PROFILE_AV_RC_ID,
 		BT_PROFILE_HEALTH_ID,
 		BT_PROFILE_HIDHOST_ID,
 		BT_PROFILE_PAN_ID,
@@ -391,10 +395,12 @@ static void init(void)
 	const struct method *m;
 	const char *argv[4];
 	char init_audio[] = "audio init";
+	char init_sco[] = "sco init";
 	char init_bt[] = "bluetooth init";
 	uint32_t i;
 
 	process_line(init_audio);
+	process_line(init_sco);
 	process_line(init_bt);
 
 	m = get_interface_method("bluetooth", "get_profile_interface");

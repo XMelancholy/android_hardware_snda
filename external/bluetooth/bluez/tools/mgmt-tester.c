@@ -36,6 +36,7 @@
 #include "monitor/bt.h"
 #include "emulator/bthost.h"
 
+#include "src/shared/util.h"
 #include "src/shared/tester.h"
 #include "src/shared/mgmt.h"
 #include "src/shared/hciemu.h"
@@ -304,7 +305,7 @@ static void test_condition_complete(struct test_data *data)
 		user->test_data = data; \
 		user->expected_version = 0x06; \
 		user->expected_manufacturer = 0x003f; \
-		user->expected_supported_settings = 0x00000fff; \
+		user->expected_supported_settings = 0x00003fff; \
 		user->initial_settings = 0x00000080; \
 		user->unmet_conditions = 0; \
 		tester_add_full(name, data, \
@@ -323,7 +324,7 @@ static void test_condition_complete(struct test_data *data)
 		user->test_data = data; \
 		user->expected_version = 0x05; \
 		user->expected_manufacturer = 0x003f; \
-		user->expected_supported_settings = 0x000001ff; \
+		user->expected_supported_settings = 0x000011ff; \
 		user->initial_settings = 0x00000080; \
 		user->unmet_conditions = 0; \
 		tester_add_full(name, data, \
@@ -342,7 +343,7 @@ static void test_condition_complete(struct test_data *data)
 		user->test_data = data; \
 		user->expected_version = 0x06; \
 		user->expected_manufacturer = 0x003f; \
-		user->expected_supported_settings = 0x00000611; \
+		user->expected_supported_settings = 0x00003611; \
 		user->initial_settings = 0x00000200; \
 		user->unmet_conditions = 0; \
 		tester_add_full(name, data, \
@@ -362,6 +363,9 @@ struct generic_data {
 	uint16_t setup_expect_hci_command;
 	const void *setup_expect_hci_param;
 	uint8_t setup_expect_hci_len;
+	uint16_t setup_send_opcode;
+	const void *setup_send_param;
+	uint16_t setup_send_len;
 	bool send_index_none;
 	uint16_t send_opcode;
 	const void *send_param;
@@ -388,6 +392,7 @@ struct generic_data {
 	bool client_enable_ssp;
 	uint8_t io_cap;
 	uint8_t client_io_cap;
+	uint8_t client_auth_req;
 	bool reject_ssp;
 	bool client_reject_ssp;
 };
@@ -743,7 +748,7 @@ static uint8_t set_connectable_off_adv_param[] = {
 		0x00, 0x08,				/* min_interval */
 		0x00, 0x08,				/* max_interval */
 		0x03,					/* type */
-		0x00,					/* own_addr_type */
+		0x01,					/* own_addr_type */
 		0x00,					/* direct_addr_type */
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* direct_addr */
 		0x07,					/* channel_map */
@@ -1718,6 +1723,9 @@ static const char stop_discovery_inq_param[] = { 0x33, 0x8b, 0x9e, 0x08, 0x00 };
 
 static const struct generic_data stop_discovery_success_test_1 = {
 	.setup_settings = settings_powered_le,
+	.setup_send_opcode = MGMT_OP_START_DISCOVERY,
+	.setup_send_param = start_discovery_bredrle_param,
+	.setup_send_len = sizeof(start_discovery_bredrle_param),
 	.send_opcode = MGMT_OP_STOP_DISCOVERY,
 	.send_param = stop_discovery_bredrle_param,
 	.send_len = sizeof(stop_discovery_bredrle_param),
@@ -1733,10 +1741,10 @@ static const struct generic_data stop_discovery_success_test_1 = {
 };
 
 static const struct generic_data stop_discovery_bredr_success_test_1 = {
-	.setup_settings = settings_powered_le,
-	.setup_expect_hci_command = BT_HCI_CMD_INQUIRY,
-	.setup_expect_hci_param = stop_discovery_inq_param,
-	.setup_expect_hci_len = sizeof(stop_discovery_inq_param),
+	.setup_settings = settings_powered,
+	.setup_send_opcode = MGMT_OP_START_DISCOVERY,
+	.setup_send_param = start_discovery_bredr_param,
+	.setup_send_len = sizeof(start_discovery_bredr_param),
 	.send_opcode = MGMT_OP_STOP_DISCOVERY,
 	.send_param = stop_discovery_bredr_param,
 	.send_len = sizeof(stop_discovery_bredr_param),
@@ -1761,6 +1769,9 @@ static const struct generic_data stop_discovery_rejected_test_1 = {
 
 static const struct generic_data stop_discovery_invalid_param_test_1 = {
 	.setup_settings = settings_powered_le,
+	.setup_send_opcode = MGMT_OP_START_DISCOVERY,
+	.setup_send_param = start_discovery_bredrle_param,
+	.setup_send_len = sizeof(start_discovery_bredrle_param),
 	.send_opcode = MGMT_OP_STOP_DISCOVERY,
 	.send_param = stop_discovery_bredrle_invalid_param,
 	.send_len = sizeof(stop_discovery_bredrle_invalid_param),
@@ -2157,33 +2168,20 @@ static const char load_ltks_invalid_param_2[] = {
 	0x00, 0x00,					/* diversifier */
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* rand */
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* value (1/2) */
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* value (2/2 */
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* value (2/2) */
 };
-/* Invalid authenticated value */
+/* Invalid master value */
 static const char load_ltks_invalid_param_3[] = {
 	0x01, 0x00,					/* count */
 	0x00, 0x01, 0x02, 0x03, 0x04, 0x05,		/* bdaddr */
 	0x01,						/* addr type */
-	0x02,						/* authenticated */
-	0x00,						/* master */
-	0x00,						/* encryption size */
-	0x00, 0x00,					/* diversifier */
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* rand */
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* value (1/2) */
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* value (2/2 */
-};
-/* Invalid master value */
-static const char load_ltks_invalid_param_4[] = {
-	0x01, 0x00,					/* count */
-	0x00, 0x01, 0x02, 0x03, 0x04, 0x05,		/* bdaddr */
-	0x01,						/* addr type */
-	0x00,						/* authunticated */
+	0x00,						/* authenticated */
 	0x02,						/* master */
 	0x00,						/* encryption size */
 	0x00, 0x00,					/* diversifier */
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* rand */
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* value (1/2) */
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* value (2/2 */
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,	/* value (2/2) */
 };
 
 static const struct generic_data load_ltks_success_test_1 = {
@@ -2211,13 +2209,6 @@ static const struct generic_data load_ltks_invalid_params_test_3 = {
 	.send_opcode = MGMT_OP_LOAD_LONG_TERM_KEYS,
 	.send_param = load_ltks_invalid_param_3,
 	.send_len = sizeof(load_ltks_invalid_param_3),
-	.expect_status = MGMT_STATUS_INVALID_PARAMS,
-};
-
-static const struct generic_data load_ltks_invalid_params_test_4 = {
-	.send_opcode = MGMT_OP_LOAD_LONG_TERM_KEYS,
-	.send_param = load_ltks_invalid_param_4,
-	.send_len = sizeof(load_ltks_invalid_param_4),
 	.expect_status = MGMT_STATUS_INVALID_PARAMS,
 };
 
@@ -2433,6 +2424,7 @@ static const struct generic_data pair_device_ssp_reject_1 = {
 	.expect_hci_func = client_bdaddr_param_func,
 	.io_cap = 0x01, /* DisplayYesNo */
 	.client_io_cap = 0x01, /* DisplayYesNo */
+	.client_auth_req = 0x01, /* No Bonding - MITM */
 	.reject_ssp = true,
 };
 
@@ -2651,6 +2643,100 @@ static const struct generic_data set_scan_params_success_test = {
 	.expect_status = MGMT_STATUS_SUCCESS,
 };
 
+static const char load_irks_empty_list[] = { 0x00, 0x00 };
+
+static const struct generic_data load_irks_success1_test = {
+	.send_opcode = MGMT_OP_LOAD_IRKS,
+	.send_param = load_irks_empty_list,
+	.send_len = sizeof(load_irks_empty_list),
+	.expect_status = MGMT_STATUS_SUCCESS,
+};
+
+static const char load_irks_one_irk[] = { 0x01, 0x00,
+			0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x01,
+			0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+			0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
+
+static const struct generic_data load_irks_success2_test = {
+	.send_opcode = MGMT_OP_LOAD_IRKS,
+	.send_param = load_irks_one_irk,
+	.send_len = sizeof(load_irks_one_irk),
+	.expect_status = MGMT_STATUS_SUCCESS,
+};
+
+static const char load_irks_nval_addr_type[] = { 0x01, 0x00,
+			0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x00,
+			0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+			0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
+
+static const struct generic_data load_irks_nval_param1_test = {
+	.send_opcode = MGMT_OP_LOAD_IRKS,
+	.send_param = load_irks_nval_addr_type,
+	.send_len = sizeof(load_irks_nval_addr_type),
+	.expect_status = MGMT_STATUS_INVALID_PARAMS,
+};
+
+static const char load_irks_nval_rand_addr[] = { 0x01, 0x00,
+			0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x02,
+			0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+			0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
+
+static const struct generic_data load_irks_nval_param2_test = {
+	.send_opcode = MGMT_OP_LOAD_IRKS,
+	.send_param = load_irks_nval_rand_addr,
+	.send_len = sizeof(load_irks_nval_rand_addr),
+	.expect_status = MGMT_STATUS_INVALID_PARAMS,
+};
+
+static const char load_irks_nval_len[] = { 0x02, 0x00, 0xff, 0xff };
+
+static const struct generic_data load_irks_nval_param3_test = {
+	.send_opcode = MGMT_OP_LOAD_IRKS,
+	.send_param = load_irks_nval_len,
+	.send_len = sizeof(load_irks_nval_len),
+	.expect_status = MGMT_STATUS_INVALID_PARAMS,
+};
+
+static const struct generic_data load_irks_not_supported_test = {
+	.send_opcode = MGMT_OP_LOAD_IRKS,
+	.send_param = load_irks_empty_list,
+	.send_len = sizeof(load_irks_empty_list),
+	.expect_status = MGMT_STATUS_NOT_SUPPORTED,
+};
+
+static const char set_privacy_valid_param[] = { 0x01,
+			0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+			0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
+static const char set_privacy_settings_param[] = { 0x80, 0x20, 0x00, 0x00 };
+
+static const struct generic_data set_privacy_success_test = {
+	.send_opcode = MGMT_OP_SET_PRIVACY,
+	.send_param = set_privacy_valid_param,
+	.send_len = sizeof(set_privacy_valid_param),
+	.expect_status = MGMT_STATUS_SUCCESS,
+	.expect_param = set_privacy_settings_param,
+	.expect_len = sizeof(set_privacy_settings_param),
+	.expect_settings_set = MGMT_SETTING_PRIVACY,
+};
+
+static const struct generic_data set_privacy_powered_test = {
+	.setup_settings = settings_powered,
+	.send_opcode = MGMT_OP_SET_PRIVACY,
+	.send_param = set_privacy_valid_param,
+	.send_len = sizeof(set_privacy_valid_param),
+	.expect_status = MGMT_STATUS_REJECTED,
+};
+
+static const char set_privacy_nval_param[] = { 0xff,
+			0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+			0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
+static const struct generic_data set_privacy_nval_param_test = {
+	.send_opcode = MGMT_OP_SET_PRIVACY,
+	.send_param = set_privacy_nval_param,
+	.send_len = sizeof(set_privacy_nval_param),
+	.expect_status = MGMT_STATUS_INVALID_PARAMS,
+};
+
 static void client_cmd_complete(uint16_t opcode, uint8_t status,
 					const void *param, uint8_t len,
 					void *user_data)
@@ -2753,62 +2839,16 @@ static void setup_discovery_callback(uint8_t status, uint16_t length,
 	tester_setup_complete();
 }
 
-static bool setup_command_hci_callback(const void *data, uint16_t len,
-								void *user_data)
-{
-	struct test_data *tdata = tester_get_data();
-	const struct generic_data *test = tdata->test_data;
-
-	tester_print("HCI Command 0x%04x length %u (setup)",
-					test->setup_expect_hci_command, len);
-
-	if (len != test->setup_expect_hci_len) {
-		tester_warn("Invalid parameter size for HCI command (setup)");
-		tester_setup_failed();
-		goto done;
-	}
-
-	if (memcmp(data, test->setup_expect_hci_param, len) != 0) {
-		tester_warn("Unexpected HCI command parameter value (setup)");
-		tester_setup_failed();
-		goto done;
-	}
-
-	tester_setup_complete();
-
-done:
-	hciemu_del_hook(tdata->hciemu, HCIEMU_HOOK_PRE_EVT,
-			test->setup_expect_hci_command);
-
-	return false;
-}
-
 static void setup_start_discovery(const void *test_data)
 {
 	struct test_data *data = tester_get_data();
 	const struct generic_data *test = data->test_data;
-	const void *send_param = test->send_param;
-	uint16_t send_len = test->send_len;
+	const void *send_param = test->setup_send_param;
+	uint16_t send_len = test->setup_send_len;
 
-	if (test->setup_expect_hci_command) {
-		tester_print("Registering HCI command callback (setup)");
-		hciemu_add_hook(data->hciemu, HCIEMU_HOOK_PRE_EVT,
-				test->setup_expect_hci_command,
-				setup_command_hci_callback,
-				NULL);
-
-		if (test->send_func)
-			send_param = test->send_func(&send_len);
-
-		mgmt_send(data->mgmt, MGMT_OP_START_DISCOVERY, data->mgmt_index,
-				send_len, send_param, NULL, NULL, NULL);
-	} else {
-		unsigned char disc_param[] = { 0x07 };
-
-		mgmt_send(data->mgmt, MGMT_OP_START_DISCOVERY, data->mgmt_index,
-					sizeof(disc_param), disc_param,
-					setup_discovery_callback, NULL, NULL);
-	}
+	mgmt_send(data->mgmt, test->setup_send_opcode, data->mgmt_index,
+				send_len, send_param, setup_discovery_callback,
+				NULL, NULL);
 }
 
 static void setup_multi_uuid32(const void *test_data)
@@ -3090,6 +3130,9 @@ static void test_setup(const void *test_data)
 	if (test->client_io_cap)
 		bthost_set_io_capability(bthost, test->client_io_cap);
 
+	if (test->client_auth_req)
+		bthost_set_auth_req(bthost, test->client_auth_req);
+
 	if (test->client_reject_ssp)
 		bthost_set_reject_user_confirm(bthost, true);
 
@@ -3162,7 +3205,7 @@ static void command_generic_new_settings_alt(uint16_t index, uint16_t length,
 		return;
 	}
 
-	settings = bt_get_le32(param);
+	settings = get_le32(param);
 
 	tester_print("New settings 0x%08x received", settings);
 
@@ -3848,9 +3891,6 @@ int main(int argc, char *argv[])
 	test_bredrle("Load Long Term Keys - Invalid Parameters 3",
 				&load_ltks_invalid_params_test_3,
 				NULL, test_command_generic);
-	test_bredrle("Load Long Term Keys - Invalid Parameters 4",
-				&load_ltks_invalid_params_test_4,
-				NULL, test_command_generic);
 
 	test_bredrle("Pair Device - Not Powered 1",
 				&pair_device_not_powered_test_1,
@@ -3942,6 +3982,35 @@ int main(int argc, char *argv[])
 
 	test_bredrle("Set Scan Parameters - Success",
 				&set_scan_params_success_test,
+				NULL, test_command_generic);
+
+	test_bredrle("Load IRKs - Success 1",
+				&load_irks_success1_test,
+				NULL, test_command_generic);
+	test_bredrle("Load IRKs - Success 2",
+				&load_irks_success2_test,
+				NULL, test_command_generic);
+	test_bredrle("Load IRKs - Invalid Parameters 1",
+				&load_irks_nval_param1_test,
+				NULL, test_command_generic);
+	test_bredrle("Load IRKs - Invalid Parameters 2",
+				&load_irks_nval_param2_test,
+				NULL, test_command_generic);
+	test_bredrle("Load IRKs - Invalid Parameters 3",
+				&load_irks_nval_param3_test,
+				NULL, test_command_generic);
+	test_bredr("Load IRKs - Not Supported",
+				&load_irks_not_supported_test,
+				NULL, test_command_generic);
+
+	test_bredrle("Set Privacy - Success",
+				&set_privacy_success_test,
+				NULL, test_command_generic);
+	test_bredrle("Set Privacy - Rejected",
+				&set_privacy_powered_test,
+				NULL, test_command_generic);
+	test_bredrle("Set Privacy - Invalid Parameters",
+				&set_privacy_nval_param_test,
 				NULL, test_command_generic);
 
 	return tester_run();

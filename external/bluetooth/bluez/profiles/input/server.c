@@ -35,14 +35,14 @@
 #include <glib.h>
 #include <dbus/dbus.h>
 
-#include "log.h"
+#include "src/log.h"
 
-#include "glib-helper.h"
+#include "src/uuid-helper.h"
 #include "btio/btio.h"
 #include "lib/uuid.h"
-#include "../src/adapter.h"
-#include "../src/device.h"
-#include "../src/profile.h"
+#include "src/adapter.h"
+#include "src/device.h"
+#include "src/profile.h"
 
 #include "device.h"
 #include "server.h"
@@ -101,7 +101,7 @@ static void sixaxis_browse_sdp(const bdaddr_t *src, const bdaddr_t *dst,
 	struct btd_device *device;
 	struct sixaxis_data *data;
 
-	device = btd_adapter_find_device(adapter_find(src), dst);
+	device = btd_adapter_find_device(adapter_find(src), dst, BDADDR_BREDR);
 	if (!device)
 		return;
 
@@ -120,7 +120,7 @@ static bool dev_is_sixaxis(const bdaddr_t *src, const bdaddr_t *dst)
 	struct btd_device *device;
 	uint16_t vid, pid;
 
-	device = btd_adapter_find_device(adapter_find(src), dst);
+	device = btd_adapter_find_device(adapter_find(src), dst, BDADDR_BREDR);
 	if (!device)
 		return false;
 

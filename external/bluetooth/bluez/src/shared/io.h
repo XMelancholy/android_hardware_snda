@@ -2,7 +2,7 @@
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
- *  Copyright (C) 2012  Intel Corporation. All rights reserved.
+ *  Copyright (C) 2012-2014  Intel Corporation. All rights reserved.
  *
  *
  *  This library is free software; you can redistribute it and/or
@@ -32,6 +32,8 @@ void io_destroy(struct io *io);
 
 int io_get_fd(struct io *io);
 bool io_set_close_on_destroy(struct io *io, bool do_close);
+
+bool io_shutdown(struct io *io);
 
 typedef bool (*io_callback_func_t)(struct io *io, void *user_data);
 

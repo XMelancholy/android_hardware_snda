@@ -27,6 +27,32 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
+#define PROPERTY_VALUE_MAX 32
+
+#define BLUETOOTH_MODE_PROPERTY_NAME "persist.sys.bluetooth.mode"
+
+static inline int property_get(const char *key, char *value,
+						const char *default_value)
+{
+	const char *prop = NULL;
+
+	if (!strcmp(key, BLUETOOTH_MODE_PROPERTY_NAME))
+		prop = getenv("BLUETOOTH_MODE");
+
+	if (!prop)
+		prop = default_value;
+
+	if (prop) {
+		strncpy(value, prop, PROPERTY_VALUE_MAX);
+
+		value[PROPERTY_VALUE_MAX - 1] = '\0';
+
+		return strlen(value);
+	}
+
+	return 0;
+}
+
 /* property_set: returns 0 on success, < 0 on failure
 */
 static inline int property_set(const char *key, const char *value)

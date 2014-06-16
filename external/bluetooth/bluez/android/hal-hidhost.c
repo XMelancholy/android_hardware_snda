@@ -23,6 +23,7 @@
 #include "hal-log.h"
 #include "hal.h"
 #include "hal-msg.h"
+#include "ipc-common.h"
 #include "hal-ipc.h"
 
 static const bthh_callbacks_t *cbacks;
@@ -69,6 +70,15 @@ static void handle_proto_mode(void *buf, uint16_t len)
 							ev->status, ev->mode);
 }
 
+static void handle_idle_time(void *buf, uint16_t len)
+{
+	struct hal_ev_hidhost_idle_time *ev = buf;
+
+	if (cbacks->idle_time_cb)
+		cbacks->idle_time_cb((bt_bdaddr_t *) ev->bdaddr, ev->status,
+								ev->idle_rate);
+}
+
 static void handle_get_report(void *buf, uint16_t len)
 {
 	struct hal_ev_hidhost_get_report *ev = buf;
@@ -92,8 +102,10 @@ static void handle_virtual_unplug(void *buf, uint16_t len)
 								ev->status);
 }
 
-/* handlers will be called from notification thread context,
- * index in table equals to 'opcode - HAL_MINIMUM_EVENT' */
+/*
+ * handlers will be called from notification thread context,
+ * index in table equals to 'opcode - HAL_MINIMUM_EVENT'
+ */
 static const struct hal_ipc_handler ev_handlers[] = {
 	{	/* HAL_EV_HIDHOST_CONN_STATE */
 		.handler = handle_conn_state,
@@ -109,6 +121,11 @@ static const struct hal_ipc_handler ev_handlers[] = {
 		.handler = handle_proto_mode,
 		.var_len = false,
 		.data_len = sizeof(struct hal_ev_hidhost_proto_mode),
+	},
+	{	/* HAL_EV_HIDHOST_IDLE_TIME */
+		.handler = handle_idle_time,
+		.var_len = false,
+		.data_len = sizeof(struct hal_ev_hidhost_idle_time),
 	},
 	{	/* HAL_EV_HIDHOST_GET_REPORT */
 		.handler = handle_get_report,
@@ -279,7 +296,7 @@ static bt_status_t set_report(bt_bdaddr_t *bd_addr,
 						bthh_report_type_t report_type,
 						char *report)
 {
-	uint8_t buf[BLUEZ_HAL_MTU];
+	uint8_t buf[IPC_MTU];
 	struct hal_cmd_hidhost_set_report *cmd = (void *) buf;
 
 	DBG("");
@@ -303,7 +320,7 @@ static bt_status_t set_report(bt_bdaddr_t *bd_addr,
 
 static bt_status_t send_data(bt_bdaddr_t *bd_addr, char *data)
 {
-	uint8_t buf[BLUEZ_HAL_MTU];
+	uint8_t buf[IPC_MTU];
 	struct hal_cmd_hidhost_send_data *cmd = (void *) buf;
 
 	DBG("");
@@ -339,6 +356,7 @@ static bt_status_t init(bthh_callbacks_t *callbacks)
 				sizeof(ev_handlers)/sizeof(ev_handlers[0]));
 
 	cmd.service_id = HAL_SERVICE_ID_HIDHOST;
+	cmd.mode = HAL_MODE_DEFAULT;
 
 	ret = hal_ipc_cmd(HAL_SERVICE_ID_CORE, HAL_OP_REGISTER_MODULE,
 					sizeof(cmd), &cmd, 0, NULL, NULL);

@@ -2,7 +2,7 @@
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
- *  Copyright (C) 2012  Intel Corporation. All rights reserved.
+ *  Copyright (C) 2012-2014  Intel Corporation. All rights reserved.
  *
  *
  *  This library is free software; you can redistribute it and/or
@@ -31,12 +31,11 @@
 #include <sys/socket.h>
 
 #include "monitor/bt.h"
+#include "monitor/mainloop.h"
 #include "src/shared/io.h"
 #include "src/shared/util.h"
 #include "src/shared/queue.h"
-#include "monitor/mainloop.h"
-
-#include "hci.h"
+#include "src/shared/hci.h"
 
 #define BTPROTO_HCI	1
 struct sockaddr_hci {
@@ -286,7 +285,7 @@ static bool io_read_callback(struct io *io, void *user_data)
 	return true;
 }
 
-struct bt_hci *bt_hci_new(int fd)
+static struct bt_hci *create_hci(int fd)
 {
 	struct bt_hci *hci;
 
@@ -345,6 +344,17 @@ struct bt_hci *bt_hci_new(int fd)
 	return bt_hci_ref(hci);
 }
 
+struct bt_hci *bt_hci_new(int fd)
+{
+	struct bt_hci *hci;
+
+	hci = create_hci(fd);
+	if (!hci)
+		return NULL;
+
+	return hci;
+}
+
 static int create_socket(uint16_t index, uint16_t channel)
 {
 	struct sockaddr_hci addr;
@@ -377,7 +387,7 @@ struct bt_hci *bt_hci_new_user_channel(uint16_t index)
 	if (fd < 0)
 		return NULL;
 
-	hci = bt_hci_new(fd);
+	hci = create_hci(fd);
 	if (!hci) {
 		close(fd);
 		return NULL;
@@ -410,7 +420,7 @@ struct bt_hci *bt_hci_new_raw_device(uint16_t index)
 		return NULL;
 	}
 
-	hci = bt_hci_new(fd);
+	hci = create_hci(fd);
 	if (!hci) {
 		close(fd);
 		return NULL;

@@ -34,8 +34,18 @@
 
 #include <glib.h>
 
+#include "src/shared/util.h"
 #include "lib/uuid.h"
 #include "att.h"
+
+static inline void put_uuid_le(const bt_uuid_t *src, void *dst)
+{
+	if (src->type == BT_UUID16)
+		put_le16(src->value.u16, dst);
+	else
+		/* Convert from 128-bit BE to LE */
+		bswap_128(&src->value.u128, dst);
+}
 
 const char *att_ecode2str(uint8_t status)
 {
@@ -120,6 +130,19 @@ struct att_data_list *att_data_list_alloc(uint16_t num, uint16_t len)
 	return list;
 }
 
+static void get_uuid(uint8_t type, const void *val, bt_uuid_t *uuid)
+{
+	if (type == BT_UUID16)
+		bt_uuid16_create(uuid, get_le16(val));
+	else {
+		uint128_t u128;
+
+		/* Convert from 128-bit LE to BE */
+		bswap_128(val, &u128);
+		bt_uuid128_create(uuid, u128);
+	}
+}
+
 uint16_t enc_read_by_grp_req(uint16_t start, uint16_t end, bt_uuid_t *uuid,
 						uint8_t *pdu, size_t len)
 {
@@ -138,11 +161,11 @@ uint16_t enc_read_by_grp_req(uint16_t start, uint16_t end, bt_uuid_t *uuid,
 	/* Attribute Opcode (1 octet) */
 	pdu[0] = ATT_OP_READ_BY_GROUP_REQ;
 	/* Starting Handle (2 octets) */
-	att_put_u16(start, &pdu[1]);
+	put_le16(start, &pdu[1]);
 	/* Ending Handle (2 octets) */
-	att_put_u16(end, &pdu[3]);
+	put_le16(end, &pdu[3]);
 	/* Attribute Group Type (2 or 16 octet UUID) */
-	att_put_uuid(*uuid, &pdu[5]);
+	put_uuid_le(uuid, &pdu[5]);
 
 	return 5 + uuid_len;
 }
@@ -151,6 +174,7 @@ uint16_t dec_read_by_grp_req(const uint8_t *pdu, size_t len, uint16_t *start,
 						uint16_t *end, bt_uuid_t *uuid)
 {
 	const size_t min_len = sizeof(pdu[0]) + sizeof(*start) + sizeof(*end);
+	uint8_t type;
 
 	if (pdu == NULL)
 		return 0;
@@ -161,15 +185,17 @@ uint16_t dec_read_by_grp_req(const uint8_t *pdu, size_t len, uint16_t *start,
 	if (pdu[0] != ATT_OP_READ_BY_GROUP_REQ)
 		return 0;
 
-	if (len != (min_len + 2) && len != (min_len + 16))
+	if (len == (min_len + 2))
+		type = BT_UUID16;
+	else if (len == (min_len + 16))
+		type = BT_UUID128;
+	else
 		return 0;
 
-	*start = att_get_u16(&pdu[1]);
-	*end = att_get_u16(&pdu[3]);
-	if (len == min_len + 2)
-		*uuid = att_get_uuid16(&pdu[5]);
-	else
-		*uuid = att_get_uuid128(&pdu[5]);
+	*start = get_le16(&pdu[1]);
+	*end = get_le16(&pdu[3]);
+
+	get_uuid(type, &pdu[5], uuid);
 
 	return len;
 }
@@ -265,9 +291,9 @@ uint16_t enc_find_by_type_req(uint16_t start, uint16_t end, bt_uuid_t *uuid,
 		vlen = len - min_len;
 
 	pdu[0] = ATT_OP_FIND_BY_TYPE_REQ;
-	att_put_u16(start, &pdu[1]);
-	att_put_u16(end, &pdu[3]);
-	att_put_uuid16(*uuid, &pdu[5]);
+	put_le16(start, &pdu[1]);
+	put_le16(end, &pdu[3]);
+	put_le16(uuid->value.u16, &pdu[5]);
 
 	if (vlen > 0) {
 		memcpy(&pdu[7], value, vlen);
@@ -292,11 +318,11 @@ uint16_t dec_find_by_type_req(const uint8_t *pdu, size_t len, uint16_t *start,
 		return 0;
 
 	/* First requested handle number (2 octets) */
-	*start = att_get_u16(&pdu[1]);
+	*start = get_le16(&pdu[1]);
 	/* Last requested handle number (2 octets) */
-	*end = att_get_u16(&pdu[3]);
+	*end = get_le16(&pdu[3]);
 	/* 16-bit UUID to find (2 octets) */
-	*uuid = att_get_uuid16(&pdu[5]);
+	bt_uuid16_create(uuid, get_le16(&pdu[5]));
 
 	/* Attribute value to find */
 	*vlen = len - 7;
@@ -321,8 +347,8 @@ uint16_t enc_find_by_type_resp(GSList *matches, uint8_t *pdu, size_t len)
 				l = l->next, offset += sizeof(uint16_t) * 2) {
 		struct att_range *range = l->data;
 
-		att_put_u16(range->start, &pdu[offset]);
-		att_put_u16(range->end, &pdu[offset + 2]);
+		put_le16(range->start, &pdu[offset]);
+		put_le16(range->end, &pdu[offset + 2]);
 	}
 
 	return offset;
@@ -353,8 +379,8 @@ GSList *dec_find_by_type_resp(const uint8_t *pdu, size_t len)
 				len >= (offset + sizeof(uint16_t) * 2);
 				offset += sizeof(uint16_t) * 2) {
 		range = g_new0(struct att_range, 1);
-		range->start = att_get_u16(&pdu[offset]);
-		range->end = att_get_u16(&pdu[offset + 2]);
+		range->start = get_le16(&pdu[offset]);
+		range->end = get_le16(&pdu[offset + 2]);
 
 		matches = g_slist_append(matches, range);
 	}
@@ -380,11 +406,11 @@ uint16_t enc_read_by_type_req(uint16_t start, uint16_t end, bt_uuid_t *uuid,
 	/* Attribute Opcode (1 octet) */
 	pdu[0] = ATT_OP_READ_BY_TYPE_REQ;
 	/* Starting Handle (2 octets) */
-	att_put_u16(start, &pdu[1]);
+	put_le16(start, &pdu[1]);
 	/* Ending Handle (2 octets) */
-	att_put_u16(end, &pdu[3]);
+	put_le16(end, &pdu[3]);
 	/* Attribute Type (2 or 16 octet UUID) */
-	att_put_uuid(*uuid, &pdu[5]);
+	put_uuid_le(uuid, &pdu[5]);
 
 	return 5 + uuid_len;
 }
@@ -393,6 +419,7 @@ uint16_t dec_read_by_type_req(const uint8_t *pdu, size_t len, uint16_t *start,
 						uint16_t *end, bt_uuid_t *uuid)
 {
 	const size_t min_len = sizeof(pdu[0]) + sizeof(*start) + sizeof(*end);
+	uint8_t type;
 
 	if (pdu == NULL)
 		return 0;
@@ -400,19 +427,20 @@ uint16_t dec_read_by_type_req(const uint8_t *pdu, size_t len, uint16_t *start,
 	if (start == NULL || end == NULL || uuid == NULL)
 		return 0;
 
-	if (len != (min_len + 2) && len != (min_len + 16))
+	if (len == (min_len + 2))
+		type = BT_UUID16;
+	else if (len == (min_len + 16))
+		type = BT_UUID128;
+	else
 		return 0;
 
 	if (pdu[0] != ATT_OP_READ_BY_TYPE_REQ)
 		return 0;
 
-	*start = att_get_u16(&pdu[1]);
-	*end = att_get_u16(&pdu[3]);
+	*start = get_le16(&pdu[1]);
+	*end = get_le16(&pdu[3]);
 
-	if (len == min_len + 2)
-		*uuid = att_get_uuid16(&pdu[5]);
-	else
-		*uuid = att_get_uuid128(&pdu[5]);
+	get_uuid(type, &pdu[5], uuid);
 
 	return len;
 }
@@ -499,7 +527,7 @@ uint16_t enc_write_cmd(uint16_t handle, const uint8_t *value, size_t vlen,
 		vlen = len - min_len;
 
 	pdu[0] = ATT_OP_WRITE_CMD;
-	att_put_u16(handle, &pdu[1]);
+	put_le16(handle, &pdu[1]);
 
 	if (vlen > 0) {
 		memcpy(&pdu[3], value, vlen);
@@ -526,7 +554,7 @@ uint16_t dec_write_cmd(const uint8_t *pdu, size_t len, uint16_t *handle,
 	if (pdu[0] != ATT_OP_WRITE_CMD)
 		return 0;
 
-	*handle = att_get_u16(&pdu[1]);
+	*handle = get_le16(&pdu[1]);
 	memcpy(value, pdu + min_len, len - min_len);
 	*vlen = len - min_len;
 
@@ -545,7 +573,7 @@ uint16_t enc_write_req(uint16_t handle, const uint8_t *value, size_t vlen,
 		vlen = len - min_len;
 
 	pdu[0] = ATT_OP_WRITE_REQ;
-	att_put_u16(handle, &pdu[1]);
+	put_le16(handle, &pdu[1]);
 
 	if (vlen > 0) {
 		memcpy(&pdu[3], value, vlen);
@@ -572,7 +600,7 @@ uint16_t dec_write_req(const uint8_t *pdu, size_t len, uint16_t *handle,
 	if (pdu[0] != ATT_OP_WRITE_REQ)
 		return 0;
 
-	*handle = att_get_u16(&pdu[1]);
+	*handle = get_le16(&pdu[1]);
 	*vlen = len - min_len;
 	if (*vlen > 0)
 		memcpy(value, pdu + min_len, *vlen);
@@ -609,7 +637,7 @@ uint16_t enc_read_req(uint16_t handle, uint8_t *pdu, size_t len)
 	/* Attribute Opcode (1 octet) */
 	pdu[0] = ATT_OP_READ_REQ;
 	/* Attribute Handle (2 octets) */
-	att_put_u16(handle, &pdu[1]);
+	put_le16(handle, &pdu[1]);
 
 	return 3;
 }
@@ -623,9 +651,9 @@ uint16_t enc_read_blob_req(uint16_t handle, uint16_t offset, uint8_t *pdu,
 	/* Attribute Opcode (1 octet) */
 	pdu[0] = ATT_OP_READ_BLOB_REQ;
 	/* Attribute Handle (2 octets) */
-	att_put_u16(handle, &pdu[1]);
+	put_le16(handle, &pdu[1]);
 	/* Value Offset (2 octets) */
-	att_put_u16(offset, &pdu[3]);
+	put_le16(offset, &pdu[3]);
 
 	return 5;
 }
@@ -646,7 +674,7 @@ uint16_t dec_read_req(const uint8_t *pdu, size_t len, uint16_t *handle)
 	if (pdu[0] != ATT_OP_READ_REQ)
 		return 0;
 
-	*handle = att_get_u16(&pdu[1]);
+	*handle = get_le16(&pdu[1]);
 
 	return min_len;
 }
@@ -672,8 +700,8 @@ uint16_t dec_read_blob_req(const uint8_t *pdu, size_t len, uint16_t *handle,
 	if (pdu[0] != ATT_OP_READ_BLOB_REQ)
 		return 0;
 
-	*handle = att_get_u16(&pdu[1]);
-	*offset = att_get_u16(&pdu[3]);
+	*handle = get_le16(&pdu[1]);
+	*offset = get_le16(&pdu[3]);
 
 	return min_len;
 }
@@ -741,7 +769,7 @@ uint16_t enc_error_resp(uint8_t opcode, uint16_t handle, uint8_t status,
 	/* Request Opcode In Error (1 octet) */
 	pdu[1] = opcode;
 	/* Attribute Handle In Error (2 octets) */
-	att_put_u16(handle, &pdu[2]);
+	put_le16(handle, &pdu[2]);
 	/* Error Code (1 octet) */
 	pdu[4] = status;
 
@@ -757,9 +785,9 @@ uint16_t enc_find_info_req(uint16_t start, uint16_t end, uint8_t *pdu,
 	/* Attribute Opcode (1 octet) */
 	pdu[0] = ATT_OP_FIND_INFO_REQ;
 	/* Starting Handle (2 octets) */
-	att_put_u16(start, &pdu[1]);
+	put_le16(start, &pdu[1]);
 	/* Ending Handle (2 octets) */
-	att_put_u16(end, &pdu[3]);
+	put_le16(end, &pdu[3]);
 
 	return 5;
 }
@@ -781,8 +809,8 @@ uint16_t dec_find_info_req(const uint8_t *pdu, size_t len, uint16_t *start,
 	if (pdu[0] != ATT_OP_FIND_INFO_REQ)
 		return 0;
 
-	*start = att_get_u16(&pdu[1]);
-	*end = att_get_u16(&pdu[3]);
+	*start = get_le16(&pdu[1]);
+	*end = get_le16(&pdu[3]);
 
 	return min_len;
 }
@@ -867,7 +895,7 @@ uint16_t enc_notification(uint16_t handle, uint8_t *value, size_t vlen,
 		return 0;
 
 	pdu[0] = ATT_OP_HANDLE_NOTIFY;
-	att_put_u16(handle, &pdu[1]);
+	put_le16(handle, &pdu[1]);
 	memcpy(&pdu[3], value, vlen);
 
 	return vlen + min_len;
@@ -885,7 +913,7 @@ uint16_t enc_indication(uint16_t handle, uint8_t *value, size_t vlen,
 		return 0;
 
 	pdu[0] = ATT_OP_HANDLE_IND;
-	att_put_u16(handle, &pdu[1]);
+	put_le16(handle, &pdu[1]);
 	memcpy(&pdu[3], value, vlen);
 
 	return vlen + min_len;
@@ -909,7 +937,7 @@ uint16_t dec_indication(const uint8_t *pdu, size_t len, uint16_t *handle,
 	dlen = MIN(len - min_len, vlen);
 
 	if (handle)
-		*handle = att_get_u16(&pdu[1]);
+		*handle = get_le16(&pdu[1]);
 
 	memcpy(value, &pdu[3], dlen);
 
@@ -935,7 +963,7 @@ uint16_t enc_mtu_req(uint16_t mtu, uint8_t *pdu, size_t len)
 	/* Attribute Opcode (1 octet) */
 	pdu[0] = ATT_OP_MTU_REQ;
 	/* Client Rx MTU (2 octets) */
-	att_put_u16(mtu, &pdu[1]);
+	put_le16(mtu, &pdu[1]);
 
 	return 3;
 }
@@ -956,7 +984,7 @@ uint16_t dec_mtu_req(const uint8_t *pdu, size_t len, uint16_t *mtu)
 	if (pdu[0] != ATT_OP_MTU_REQ)
 		return 0;
 
-	*mtu = att_get_u16(&pdu[1]);
+	*mtu = get_le16(&pdu[1]);
 
 	return min_len;
 }
@@ -969,7 +997,7 @@ uint16_t enc_mtu_resp(uint16_t mtu, uint8_t *pdu, size_t len)
 	/* Attribute Opcode (1 octet) */
 	pdu[0] = ATT_OP_MTU_RESP;
 	/* Server Rx MTU (2 octets) */
-	att_put_u16(mtu, &pdu[1]);
+	put_le16(mtu, &pdu[1]);
 
 	return 3;
 }
@@ -990,7 +1018,7 @@ uint16_t dec_mtu_resp(const uint8_t *pdu, size_t len, uint16_t *mtu)
 	if (pdu[0] != ATT_OP_MTU_RESP)
 		return 0;
 
-	*mtu = att_get_u16(&pdu[1]);
+	*mtu = get_le16(&pdu[1]);
 
 	return min_len;
 }
@@ -1009,8 +1037,8 @@ uint16_t enc_prep_write_req(uint16_t handle, uint16_t offset,
 		vlen = len - min_len;
 
 	pdu[0] = ATT_OP_PREP_WRITE_REQ;
-	att_put_u16(handle, &pdu[1]);
-	att_put_u16(offset, &pdu[3]);
+	put_le16(handle, &pdu[1]);
+	put_le16(offset, &pdu[3]);
 
 	if (vlen > 0) {
 		memcpy(&pdu[5], value, vlen);
@@ -1038,8 +1066,8 @@ uint16_t dec_prep_write_req(const uint8_t *pdu, size_t len, uint16_t *handle,
 	if (pdu[0] != ATT_OP_PREP_WRITE_REQ)
 		return 0;
 
-	*handle = att_get_u16(&pdu[1]);
-	*offset = att_get_u16(&pdu[3]);
+	*handle = get_le16(&pdu[1]);
+	*offset = get_le16(&pdu[3]);
 
 	*vlen = len - min_len;
 	if (*vlen > 0)
@@ -1062,8 +1090,8 @@ uint16_t enc_prep_write_resp(uint16_t handle, uint16_t offset,
 		vlen = len - min_len;
 
 	pdu[0] = ATT_OP_PREP_WRITE_RESP;
-	att_put_u16(handle, &pdu[1]);
-	att_put_u16(offset, &pdu[3]);
+	put_le16(handle, &pdu[1]);
+	put_le16(offset, &pdu[3]);
 
 	if (vlen > 0) {
 		memcpy(&pdu[5], value, vlen);
@@ -1091,8 +1119,8 @@ uint16_t dec_prep_write_resp(const uint8_t *pdu, size_t len, uint16_t *handle,
 	if (pdu[0] != ATT_OP_PREP_WRITE_REQ)
 		return 0;
 
-	*handle = att_get_u16(&pdu[1]);
-	*offset = att_get_u16(&pdu[3]);
+	*handle = get_le16(&pdu[1]);
+	*offset = get_le16(&pdu[3]);
 	*vlen = len - min_len;
 	if (*vlen > 0)
 		memcpy(value, pdu + min_len, *vlen);

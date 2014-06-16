@@ -2,7 +2,7 @@
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
- *  Copyright (C) 2012  Intel Corporation. All rights reserved.
+ *  Copyright (C) 2012-2014  Intel Corporation. All rights reserved.
  *
  *
  *  This library is free software; you can redistribute it and/or
@@ -25,8 +25,8 @@
 #include <config.h>
 #endif
 
-#include "util.h"
-#include "queue.h"
+#include "src/shared/util.h"
+#include "src/shared/queue.h"
 
 struct queue_entry {
 	void *data;
@@ -200,6 +200,35 @@ void *queue_find(struct queue *queue, queue_match_func_t function,
 			return entry->data;
 
 	return NULL;
+}
+
+bool queue_remove(struct queue *queue, void *data)
+{
+	struct queue_entry *entry, *prev;
+
+	if (!queue || !data)
+		return false;
+
+	for (entry = queue->head, prev = NULL; entry;
+					prev = entry, entry = entry->next) {
+		if (entry->data != data)
+			continue;
+
+		if (prev)
+			prev->next = entry->next;
+		else
+			queue->head = entry->next;
+
+		if (!entry->next)
+			queue->tail = prev;
+
+		free(entry);
+		queue->entries--;
+
+		return true;
+	}
+
+	return false;
 }
 
 void *queue_remove_if(struct queue *queue, queue_match_func_t function,

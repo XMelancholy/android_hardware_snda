@@ -677,6 +677,8 @@ const char *bt_compidtostr(int compid)
 		return "Elgato Systems GmbH";
 	case 207:
 		return "ARCHOS SA";
+	case 208:
+		return "Dexcom, Inc.";
 	case 209:
 		return "Polar Electro Europe B.V.";
 	case 210:
@@ -744,7 +746,7 @@ const char *bt_compidtostr(int compid)
 	case 241:
 		return "Witron Technology Limited";
 	case 242:
-		return "Morse Project Inc.";
+		return "Aether Things Inc. (formerly Morse Project Inc.)";
 	case 243:
 		return "Kent Displays Inc.";
 	case 244:
@@ -837,6 +839,100 @@ const char *bt_compidtostr(int compid)
 		return "Volkswagon AG";
 	case 288:
 		return "Porsche AG";
+	case 289:
+		return "Sino Wealth Electronic Ltd.";
+	case 290:
+		return "AirTurn, Inc.";
+	case 291:
+		return "Kinsa, Inc.";
+	case 292:
+		return "HID Global";
+	case 293:
+		return "SEAT es";
+	case 294:
+		return "Promethean Ltd.";
+	case 295:
+		return "Salutica Allied Solutions";
+	case 296:
+		return "GPSI Group Pty Ltd";
+	case 297:
+		return "Nimble Devices Oy";
+	case 298:
+		return "Changzhou Yongse Infotech Co., Ltd";
+	case 299:
+		return "SportIQ";
+	case 300:
+		return "TEMEC Instruments B.V.";
+	case 301:
+		return "Sony Corporation";
+	case 302:
+		return "ASSA ABLOY";
+	case 303:
+		return "Clarion Co., Ltd.";
+	case 304:
+		return "Warehouse Innovations";
+	case 305:
+		return "Cypress Semiconductor Corporation";
+	case 306:
+		return "MADS Inc";
+	case 307:
+		return "Blue Maestro Limited";
+	case 308:
+		return "Resolution Products, Inc.";
+	case 309:
+		return "Airewear LLC";
+	case 310:
+		return "ETC sp. z.o.o.";
+	case 311:
+		return "Prestigio Plaza Ltd.";
+	case 312:
+		return "NTEO Inc.";
+	case 313:
+		return "Focus Systems Corporation";
+	case 314:
+		return "Tencent Holdings Limited";
+	case 315:
+		return "Allegion";
+	case 316:
+		return "Murata Manufacuring Co., Ltd.";
+	case 317:
+		return "WirelessWERX";
+	case 318:
+		return "Nod, Inc.";
+	case 319:
+		return "B&B Manufacturing Company";
+	case 320:
+		return "Alpine Electronics (China) Co., Ltd";
+	case 321:
+		return "FedEx Services";
+	case 322:
+		return "Grape Systems Inc.";
+	case 323:
+		return "Bkon Connect";
+	case 324:
+		return "Lintech GmbH";
+	case 325:
+		return "Novatel Wireless";
+	case 326:
+		return "Ciright";
+	case 327:
+		return "Mighty Cast, Inc.";
+	case 328:
+		return "Ambimat Electronics";
+	case 329:
+		return "Perytons Ltd.";
+	case 330:
+		return "Tivoli Audio, LLC";
+	case 331:
+		return "Master Lock";
+	case 332:
+		return "Mesh-Net Ltd";
+	case 333:
+		return "HUIZHOU DESAY SV AUTOMOTIVE CO., LTD.";
+	case 334:
+		return "Tangerine, Inc.";
+	case 335:
+		return "B&W Group Ltd.";
 	case 65535:
 		return "internal use";
 	default:

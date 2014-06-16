@@ -1,5 +1,17 @@
+PRODUCT_COPY_FILES += \
+   $(LOCAL_PATH)/fm/config/com.stericsson.hardware.fm.receiver.xml:system/etc/permissions/com.stericsson.hardware.fm.receiver.xml \
+   $(LOCAL_PATH)/fm/config/com.stericsson.hardware.fm.transmitter.xml:system/etc/permissions/com.stericsson.hardware.fm.transmitter.xml
 
-# modem_lib
+FMRADIO_CG2900_SET_TX_ONLY := false
+FMRADIO_CG2900_SET_RX_ONLY := false
+
+# Fm_cg2900
+PRODUCT_PACKAGES += \
+   libfmradio.cg2900 \
+   libfmradio.cg2900_tx \
+   libfmradio.cg2900_rx
+
+# Modem_lib
 PRODUCT_PACKAGES += \
    libisimessage \
    libmalat \
@@ -21,7 +33,7 @@ PRODUCT_PACKAGES += \
    libshmnetlnk \
    libphonet
 
-# cspsa
+# Cspsa
 PRODUCT_PACKAGES += \
    cspsa-server \
    libcspsa \
@@ -33,23 +45,6 @@ PRODUCT_PACKAGES += \
 # cg2900
 #PRODUCT_PACKAGES += \
 #   ste-cg29xx_ctrl
-
-FMRADIO_CG2900_SET_TX_ONLY := false
-FMRADIO_CG2900_SET_RX_ONLY := false
-
-# fm_cg2900
-PRODUCT_PACKAGES += \
-   libfmradio.cg2900 \
-   libfmradio.cg2900_tx \
-   libfmradio.cg2900_rx \
-
-PRODUCT_COPY_FILES += \
-   $(LOCAL_PATH)/fm/config/com.stericsson.hardware.fm.receiver.xml:system/etc/permissions/com.stericsson.hardware.fm.receiver.xml \
-   $(LOCAL_PATH)/fm/config/com.stericsson.hardware.fm.transmitter.xml:system/etc/permissions/com.stericsson.hardware.fm.transmitter.xml
-
-# FileExplorer
-#PRODUCT_PACKAGES += \
-#   FileExplorer
 
 # Modem
 PRODUCT_PACKAGES += \
@@ -66,7 +61,6 @@ PRODUCT_PACKAGES += \
 
 PRODUCT_PACKAGES += \
    libaudioparameter \
-   audio.a2dp.default \
    audio.usb.default
 
 # STE Display
@@ -75,12 +69,18 @@ PRODUCT_PACKAGES += \
    gralloc.montblanc \
    hwcomposer.montblanc \
    copybit.montblanc \
-   power.montblanc \
    sensors.montblanc \
    memtrack.montblanc
 
+   #power.montblanc \
+
 PRODUCT_PACKAGES += \
    libblt_hw
+
+# STE Camera
+PRODUCT_PACKAGES += \
+   camera.montblanc \
+   libZXImg
 
 # STE Media
 PRODUCT_PACKAGES += \
@@ -88,56 +88,45 @@ PRODUCT_PACKAGES += \
    libomxil-bellagio \
    libstelpcutils
 
+# 
+PRODUCT_PACKAGES += \
+   chargemode \
+   watchdog-kicker
+
 # Dbus
 PRODUCT_PACKAGES += \
    dbus-daemon \
    libdbus
 
-# Bluez 5 libs
+# BlueZ
 PRODUCT_PACKAGES += \
-    libbtio \
-    libbluetooth
+   libglib \
+   bluetoothd \
+   bluetooth.default \
+   haltest \
+   btmon \
+   btproxy \
+   audio.a2dp.default \
+   l2test \
+   bluetoothd-snoop \
+   init.bluetooth.rc \
+   btmgmt \
+   hcitool \
+   l2ping \
+   avtest \
+   libsbc \
+   hciattach
 
-# setup functions to initialize the encoder and decoder for A2DP streams
-PRODUCT_PACKAGES += \
-    libsbc
+# Bluez Configs
+PRODUCT_COPY_FILES += \
+   $(LOCAL_PATH)/external/bluetooth/data/audio.conf:system/etc/bluetooth/audio.conf \
+   $(LOCAL_PATH)/external/bluetooth/data/blacklist.conf:system/etc/bluetooth/blacklist.conf \
+   $(LOCAL_PATH)/external/bluetooth/data/input.conf:system/etc/bluetooth/input.conf \
+   $(LOCAL_PATH)/external/bluetooth/data/main.conf:system/etc/bluetooth/main.conf \
+   $(LOCAL_PATH)/external/bluetooth/data/network.conf:system/etc/bluetooth/network.conf \
+   $(LOCAL_PATH)/external/bluetooth/data/stack.conf:system/etc/bluetooth/stack.conf
 
-# Bluez daemon, android hal and haltest
-PRODUCT_PACKAGES += \
-    bluetoothd \
-    bluetoothd-snoop \
-    bluetooth.default \
-    audio.a2dp.default \
-    haltest
+# FileExplorer
+#PRODUCT_PACKAGES += \
+#   FileExplorer
 
-# Bluez btmon
-PRODUCT_PACKAGES += \
-    btmon
-
-# Bluez tools
-PRODUCT_PACKAGES += \
-    hciattach \
-    hciconfig \
-    hcitool \
-    hcidump \
-    rfcomm \
-    rctest \
-    l2test \
-    l2ping \
-    sdptool \
-    ciptool \
-    bccmd \
-    btproxy
-
-PRODUCT_PACKAGES += \
-   chargemode \
-   watchdog-kicker
-
-# bluez Configs
-#PRODUCT_COPY_FILES += \
-#   $(LOCAL_PATH)/external/bluetooth/data/audio.conf:system/etc/bluetooth/audio.conf \
-#   $(LOCAL_PATH)/external/bluetooth/data/blacklist.conf:system/etc/bluetooth/blacklist.conf \
-#   $(LOCAL_PATH)/external/bluetooth/data/input.conf:system/etc/bluetooth/input.conf \
-#   $(LOCAL_PATH)/external/bluetooth/data/main.conf:system/etc/bluetooth/main.conf \
-#   $(LOCAL_PATH)/external/bluetooth/data/network.conf:system/etc/bluetooth/network.conf \
-#   $(LOCAL_PATH)/external/bluetooth/data/stack.conf:system/etc/bluetooth/stack.conf

@@ -2,22 +2,22 @@
  *
  *  BlueZ - Bluetooth protocol stack for Linux
  *
- *  Copyright (C) 2011-2012  Intel Corporation
- *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
+ *  Copyright (C) 2011-2014  Intel Corporation
+ *  Copyright (C) 2002-2010  Marcel Holtmann <marcel@holtmann.org>
  *
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
+ *  This library is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU Lesser General Public
+ *  License as published by the Free Software Foundation; either
+ *  version 2.1 of the License, or (at your option) any later version.
  *
- *  This program is distributed in the hope that it will be useful,
+ *  This library is distributed in the hope that it will be useful,
  *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  Lesser General Public License for more details.
  *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
+ *  You should have received a copy of the GNU Lesser General Public
+ *  License along with this library; if not, write to the Free Software
  *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
@@ -42,14 +42,15 @@
 #include <bluetooth/hci_lib.h>
 
 #include "src/shared/util.h"
+#include "src/shared/btsnoop.h"
 #include "display.h"
 #include "bt.h"
 #include "ll.h"
 #include "hwdb.h"
+#include "keys.h"
 #include "uuid.h"
 #include "l2cap.h"
 #include "control.h"
-#include "btsnoop.h"
 #include "vendor.h"
 #include "packet.h"
 
@@ -403,8 +404,27 @@ void packet_print_error(const char *label, uint8_t error)
 	print_error(label, error);
 }
 
-static void print_addr(const char *label, const uint8_t *addr,
-						uint8_t addr_type)
+static void print_addr_type(const char *label, uint8_t addr_type)
+{
+	const char *str;
+
+	switch (addr_type) {
+	case 0x00:
+		str = "Public";
+		break;
+	case 0x01:
+		str = "Random";
+		break;
+	default:
+		str = "Reserved";
+		break;
+	}
+
+	print_field("%s: %s (0x%2.2x)", label, str, addr_type);
+}
+
+static void print_addr_resolve(const char *label, const uint8_t *addr,
+					uint8_t addr_type, bool resolve)
 {
 	const char *str;
 	char *company;
@@ -448,6 +468,16 @@ static void print_addr(const char *label, const uint8_t *addr,
 		print_field("%s: %2.2X:%2.2X:%2.2X:%2.2X:%2.2X:%2.2X (%s)",
 					label, addr[5], addr[4], addr[3],
 					addr[2], addr[1], addr[0], str);
+
+		if (resolve && (addr[5] & 0xc0) == 0x40) {
+			uint8_t ident[6], ident_type;
+
+			if (keys_resolve_identity(addr, ident, &ident_type)) {
+				print_addr_type("  Identity type", ident_type);
+				print_addr_resolve("  Identity", ident,
+							ident_type, false);
+			}
+		}
 		break;
 	default:
 		print_field("%s: %2.2X-%2.2X-%2.2X-%2.2X-%2.2X-%2.2X",
@@ -457,23 +487,10 @@ static void print_addr(const char *label, const uint8_t *addr,
 	}
 }
 
-static void print_addr_type(const char *label, uint8_t addr_type)
+static void print_addr(const char *label, const uint8_t *addr,
+						uint8_t addr_type)
 {
-	const char *str;
-
-	switch (addr_type) {
-	case 0x00:
-		str = "Public";
-		break;
-	case 0x01:
-		str = "Random";
-		break;
-	default:
-		str = "Reserved";
-		break;
-	}
-
-	print_field("%s: %s (0x%2.2x)", label, str, addr_type);
+	print_addr_resolve(label, addr, addr_type, true);
 }
 
 static void print_bdaddr(const uint8_t *bdaddr)
@@ -842,6 +859,77 @@ static void print_dev_class(const uint8_t *dev_class)
 	if (mask)
 		print_text(COLOR_UNKNOWN_SERVICE_CLASS,
 				"  Unknown service class (0x%2.2x)", mask);
+}
+
+static const struct {
+	uint16_t val;
+	bool generic;
+	const char *str;
+} appearance_table[] = {
+	{    0, true,  "Unknown"		},
+	{   64, true,  "Phone"			},
+	{  128, true,  "Computer"		},
+	{  192, true,  "Watch"			},
+	{  193, false, "Sports Watch"		},
+	{  256, true,  "Clock"			},
+	{  320, true,  "Display"		},
+	{  384, true,  "Remote Control"		},
+	{  448, true,  "Eye-glasses"		},
+	{  512, true,  "Tag"			},
+	{  576, true,  "Keyring"		},
+	{  640, true,  "Media Player"		},
+	{  704, true,  "Barcode Scanner"	},
+	{  768, true,  "Thermometer"		},
+	{  769, false, "Thermometer: Ear"	},
+	{  832, true,  "Heart Rate Sensor"	},
+	{  833, false, "Heart Rate Belt"	},
+	{  896, true,  "Blood Pressure"		},
+	{  897, false, "Blood Pressure: Arm"	},
+	{  898, false, "Blood Pressure: Wrist"	},
+	{  960, true,  "Human Interface Device"	},
+	{  961, false, "Keyboard"		},
+	{  962, false, "Mouse"			},
+	{  963, false, "Joystick"		},
+	{  964, false, "Gamepad"		},
+	{  965, false, "Digitizer Tablet"	},
+	{  966, false, "Card Reader"		},
+	{  967, false, "Digital Pen"		},
+	{  968, false, "Barcode Scanner"	},
+	{ 1024, true,  "Glucose Meter"		},
+	{ 1088, true,  "Running Walking Sensor"	},
+	{ 1152, true,  "Cycling"		},
+	{ 1216, true,  "Undefined"		},
+
+	{ 3136, true,  "Pulse Oximeter"		},
+	{ 3200, true,  "Undefined"		},
+
+	{ 5184, true,  "Outdoor Sports Activity"},
+	{ 5248, true,  "Undefined"		},
+	{ }
+};
+
+static void print_appearance(uint16_t appearance)
+{
+	const char *str = NULL;
+	int i, type = 0;
+
+	for (i = 0; appearance_table[i].str; i++) {
+		if (appearance_table[i].generic) {
+			if (appearance < appearance_table[i].val)
+				break;
+			type = i;
+		}
+
+		if (appearance_table[i].val == appearance) {
+			str = appearance_table[i].str;
+			break;
+		}
+	}
+
+	if (!str)
+		str = appearance_table[type].str;
+
+	print_field("Appearance: %s (0x%4.4x)", str, appearance);
 }
 
 static void print_num_broadcast_retrans(uint8_t num_retrans)
@@ -1828,10 +1916,10 @@ static void print_flow_spec(const char *label, const uint8_t *data)
 
 	print_field("%s flow spec: 0x%2.2x", label, data[0]);
 	print_field("  Service type: %s (0x%2.2x)", str, data[1]);
-	print_field("  Maximum SDU size: 0x%4.4x", bt_get_le16(data + 2));
-	print_field("  SDU inter-arrival time: 0x%8.8x", bt_get_le32(data + 4));
-	print_field("  Access latency: 0x%8.8x", bt_get_le32(data + 8));
-	print_field("  Flush timeout: 0x%8.8x", bt_get_le32(data + 12));
+	print_field("  Maximum SDU size: 0x%4.4x", get_le16(data + 2));
+	print_field("  SDU inter-arrival time: 0x%8.8x", get_le32(data + 4));
+	print_field("  Access latency: 0x%8.8x", get_le32(data + 8));
+	print_field("  Flush timeout: 0x%8.8x", get_le32(data + 12));
 }
 
 static void print_short_range_mode(uint8_t mode)
@@ -2382,13 +2470,34 @@ static void print_le_states(const uint8_t *states_array)
 
 static void print_le_channel_map(const uint8_t *map)
 {
+	unsigned int count = 0, start = 0;
 	char str[11];
-	int i;
+	int i, n;
 
 	for (i = 0; i < 5; i++)
 		sprintf(str + (i * 2), "%2.2x", map[i]);
 
 	print_field("Channel map: 0x%s", str);
+
+	for (i = 0; i < 5; i++) {
+		for (n = 0; n < 8; n++) {
+			if (map[i] & (1 << n)) {
+				if (count == 0)
+					start = (i * 8) + n;
+				count++;
+				continue;
+			}
+
+			if (count > 1) {
+				print_field("  Channel %u-%u",
+						start, start + count - 1 );
+				count = 0;
+			} else if (count > 0) {
+				print_field("  Channel %u", start);
+				count = 0;
+			}
+		}
+	}
 }
 
 void packet_print_channel_map_ll(const uint8_t *map)
@@ -2396,9 +2505,14 @@ void packet_print_channel_map_ll(const uint8_t *map)
 	print_le_channel_map(map);
 }
 
-static void print_random_number(const uint8_t *number)
+static void print_random_number(uint64_t rand)
 {
-	print_hex_field("Random number", number, 8);
+	print_field("Random number: 0x%16.16" PRIx64, le64_to_cpu(rand));
+}
+
+static void print_encrypted_diversifier(uint16_t ediv)
+{
+	print_field("Encrypted diversifier: 0x%4.4x", le16_to_cpu(ediv));
 }
 
 static const struct {
@@ -2629,50 +2743,91 @@ static void print_fec(uint8_t fec)
 static void print_manufacturer_apple(const void *data, uint8_t data_len)
 {
 	uint8_t type = *((uint8_t *) data);
-	uint8_t len;
-	const uint8_t *uuid;
-	uint16_t minor, major;
-	int8_t tx_power;
-	char identifier[100];
 
 	if (data_len < 1)
 		return;
 
-	switch (type) {
-	case 0x01:
+	if (type == 0x01) {
+		char identifier[100];
+
 		snprintf(identifier, sizeof(identifier) - 1, "%s",
 						(const char *) (data + 1));
+
 		print_field("  Identifier: %s", identifier);
-		break;
-	case 0x02:
-		len = *((uint8_t *) (data + 1));
-		if (len != 0x15 || len != data_len - 2) {
-			print_hex_field("  Data", data, data_len);
+		return;
+	}
+
+	while (data_len > 0) {
+		uint8_t len;
+		const char *str;
+
+		type = *((uint8_t *) data);
+		data++;
+		data_len--;
+
+		if (type == 0x00)
+			continue;
+
+		if (data_len < 1)
+			break;
+
+		switch (type) {
+		case 0x02:
+			str = "iBeacon";
+			break;
+		case 0x05:
+			str = "AirDrop";
+			break;
+		case 0x09:
+			str = "Apple TV";
+			break;
+		default:
+			str = "Unknown";
 			break;
 		}
 
-		uuid = data + 2;
-		print_field("  iBeacon: %8.8x-%4.4x-%4.4x-%4.4x-%8.8x%4.4x",
-				bt_get_le32(&uuid[12]), bt_get_le16(&uuid[10]),
-				bt_get_le16(&uuid[8]), bt_get_le16(&uuid[6]),
-				bt_get_le32(&uuid[2]), bt_get_le16(&uuid[0]));
+		print_field("  Type: %s (%u)", str, type);
 
-		major = bt_get_le16(data + 18);
-		minor = bt_get_le16(data + 20);
-		print_field("  Version: %u.%u", major, minor);
+		len = *((uint8_t *) data);
+		data++;
+		data_len--;
 
-		tx_power = *(int8_t *) (data + 22);
-		print_field("  TX power: %d dB", tx_power);
-		break;
-	default:
-		print_hex_field("  Data", data, data_len);
-		break;
+		if (len < 1)
+			continue;
+
+		if (len > data_len)
+			break;
+
+		if (type == 0x02 && len == 0x15) {
+			const uint8_t *uuid;
+			uint16_t minor, major;
+			int8_t tx_power;
+
+			uuid = data;
+			print_field("  UUID: %8.8x-%4.4x-%4.4x-%4.4x-%8.8x%4.4x",
+				get_le32(&uuid[12]), get_le16(&uuid[10]),
+				get_le16(&uuid[8]), get_le16(&uuid[6]),
+				get_le32(&uuid[2]), get_le16(&uuid[0]));
+
+			major = get_le16(data + 16);
+			minor = get_le16(data + 18);
+			print_field("  Version: %u.%u", major, minor);
+
+			tx_power = *(int8_t *) (data + 20);
+			print_field("  TX power: %d dB", tx_power);
+		} else
+			print_hex_field("  Data", data, len);
+
+		data += len;
+		data_len -= len;
 	}
+
+	packet_hexdump(data, data_len);
 }
 
 static void print_manufacturer_data(const void *data, uint8_t data_len)
 {
-	uint16_t company = bt_get_le16(data);
+	uint16_t company = get_le16(data);
 
 	packet_print_company("Company", company);
 
@@ -2696,10 +2851,10 @@ static void print_device_id(const void *data, uint8_t data_len)
 	if (data_len < 8)
 		return;
 
-	source = bt_get_le16(data);
-	vendor = bt_get_le16(data + 2);
-	product = bt_get_le16(data + 4);
-	version = bt_get_le16(data + 6);
+	source = get_le16(data);
+	vendor = get_le16(data + 2);
+	product = get_le16(data + 4);
+	version = get_le16(data + 6);
 
 	switch (source) {
 	case 0x0001:
@@ -2757,7 +2912,7 @@ static void print_uuid16_list(const char *label, const void *data,
 	print_field("%s: %u entr%s", label, count, count == 1 ? "y" : "ies");
 
 	for (i = 0; i < count; i++) {
-		uint16_t uuid = bt_get_le16(data + (i * 2));
+		uint16_t uuid = get_le16(data + (i * 2));
 		print_field("  %s (0x%4.4x)", uuid16_to_str(uuid), uuid);
 	}
 }
@@ -2771,7 +2926,7 @@ static void print_uuid32_list(const char *label, const void *data,
 	print_field("%s: %u entr%s", label, count, count == 1 ? "y" : "ies");
 
 	for (i = 0; i < count; i++) {
-		uint32_t uuid = bt_get_le32(data + (i * 4));
+		uint32_t uuid = get_le32(data + (i * 4));
 		print_field("  %s (0x%8.8x)", uuid32_to_str(uuid), uuid);
 	}
 }
@@ -2788,9 +2943,9 @@ static void print_uuid128_list(const char *label, const void *data,
 		const uint8_t *uuid = data + (i * 16);
 
 		print_field("  %8.8x-%4.4x-%4.4x-%4.4x-%8.8x%4.4x",
-				bt_get_le32(&uuid[12]), bt_get_le16(&uuid[10]),
-				bt_get_le16(&uuid[8]), bt_get_le16(&uuid[6]),
-				bt_get_le32(&uuid[2]), bt_get_le16(&uuid[0]));
+				get_le32(&uuid[12]), get_le16(&uuid[10]),
+				get_le16(&uuid[8]), get_le16(&uuid[6]),
+				get_le32(&uuid[2]), get_le16(&uuid[0]));
 	}
 }
 
@@ -2960,8 +3115,8 @@ static void print_eir(const uint8_t *eir, uint8_t eir_len, bool le)
 			if (data_len < 4)
 				break;
 			print_field("Slave Conn. Interval: 0x%4.4x - 0x%4.4x",
-							bt_get_le16(&data[0]),
-							bt_get_le16(&data[2]));
+							get_le16(&data[0]),
+							get_le16(&data[2]));
 			break;
 
 		case BT_EIR_SERVICE_UUID16:
@@ -2982,7 +3137,7 @@ static void print_eir(const uint8_t *eir, uint8_t eir_len, bool le)
 			if (data_len < 2)
 				break;
 			sprintf(label, "Service Data (UUID 0x%4.4x)",
-							bt_get_le16(&data[0]));
+							get_le16(&data[0]));
 			print_hex_field(label, &data[2], data_len - 2);
 			break;
 
@@ -3001,7 +3156,7 @@ static void print_eir(const uint8_t *eir, uint8_t eir_len, bool le)
 		case BT_EIR_GAP_APPEARANCE:
 			if (data_len < 2)
 				break;
-			print_field("Appearance: 0x%4.4x", bt_get_le16(data));
+			print_appearance(get_le16(data));
 			break;
 
 		case BT_EIR_SSP_HASH_P256:
@@ -3118,11 +3273,17 @@ void packet_control(struct timeval *tv, uint16_t index, uint16_t opcode,
 	control_message(opcode, data, size);
 }
 
+static int addr2str(const uint8_t *addr, char *str)
+{
+	return sprintf(str, "%2.2X:%2.2X:%2.2X:%2.2X:%2.2X:%2.2X",
+			addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
+}
+
 #define MAX_INDEX 16
 
 struct index_data {
-	uint8_t  type;
-	bdaddr_t bdaddr;
+	uint8_t type;
+	uint8_t bdaddr[6];
 };
 
 static struct index_data index_list[MAX_INDEX];
@@ -3132,7 +3293,6 @@ void packet_monitor(struct timeval *tv, uint16_t index, uint16_t opcode,
 {
 	const struct btsnoop_opcode_new_index *ni;
 	char str[18], extra_str[24];
-	bdaddr_t bdaddr;
 
 	if (index_filter && index_number != index)
 		return;
@@ -3145,21 +3305,20 @@ void packet_monitor(struct timeval *tv, uint16_t index, uint16_t opcode,
 	switch (opcode) {
 	case BTSNOOP_OPCODE_NEW_INDEX:
 		ni = data;
-		memcpy(&bdaddr, ni->bdaddr, 6);
 
 		if (index < MAX_INDEX) {
 			index_list[index].type = ni->type;
-			memcpy(&index_list[index].bdaddr, &bdaddr, 6);
+			memcpy(index_list[index].bdaddr, ni->bdaddr, 6);
 		}
 
-		ba2str(&bdaddr, str);
+		addr2str(ni->bdaddr, str);
 		packet_new_index(tv, index, str, ni->type, ni->bus, ni->name);
 		break;
 	case BTSNOOP_OPCODE_DEL_INDEX:
 		if (index < MAX_INDEX)
-			ba2str(&index_list[index].bdaddr, str);
+			addr2str(index_list[index].bdaddr, str);
 		else
-			ba2str(BDADDR_ANY, str);
+			sprintf(str, "00:00:00:00:00:00");
 
 		packet_del_index(tv, index, str);
 		break;
@@ -5492,9 +5651,8 @@ static void le_start_encrypt_cmd(const void *data, uint8_t size)
 	const struct bt_hci_cmd_le_start_encrypt *cmd = data;
 
 	print_handle(cmd->handle);
-	print_random_number(cmd->number);
-	print_field("Encryption diversifier: 0x%4.4x",
-					le16_to_cpu(cmd->diversifier));
+	print_random_number(cmd->rand);
+	print_encrypted_diversifier(cmd->ediv);
 	print_key("Long term key", cmd->ltk);
 }
 
@@ -7098,9 +7256,8 @@ static void le_long_term_key_request_evt(const void *data, uint8_t size)
 	const struct bt_hci_evt_le_long_term_key_request *evt = data;
 
 	print_handle(evt->handle);
-	print_random_number(evt->number);
-	print_field("Encryption diversifier: 0x%4.4x",
-					le16_to_cpu(evt->diversifier));
+	print_random_number(evt->rand);
+	print_encrypted_diversifier(evt->ediv);
 }
 
 struct subevent_data {
@@ -7417,6 +7574,13 @@ void packet_hci_command(struct timeval *tv, uint16_t index,
 		return;
 	}
 
+	if (size != hdr->plen) {
+		print_text(COLOR_ERROR, "invalid packet size (%u != %u)", size,
+								hdr->plen);
+		packet_hexdump(data, size);
+		return;
+	}
+
 	if (opcode_data->cmd_fixed) {
 		if (hdr->plen != opcode_data->cmd_size) {
 			print_text(COLOR_ERROR, "invalid packet size");
@@ -7478,6 +7642,13 @@ void packet_hci_event(struct timeval *tv, uint16_t index,
                                                         event_str, extra_str);
 
 	if (!event_data || !event_data->func) {
+		packet_hexdump(data, size);
+		return;
+	}
+
+	if (size != hdr->plen) {
+		print_text(COLOR_ERROR, "invalid packet size (%u != %u)", size,
+								hdr->plen);
 		packet_hexdump(data, size);
 		return;
 	}
